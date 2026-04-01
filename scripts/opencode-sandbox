@@ -117,6 +117,55 @@ def main():
     ws_meta_dir.mkdir(parents=True, exist_ok=True)
     xdg_config.mkdir(parents=True, exist_ok=True)
 
+    # Global and Local Auth paths
+    global_auth = xdg_config / "auth.json"
+    local_auth = ws_meta_dir / "auth.json"
+
+    # Migration/Merge: If local auth exists, merge its keys into global auth
+    if local_auth.exists() and not local_auth.is_symlink():
+        try:
+            local_content = local_auth.read_text().strip()
+            local_data = json.loads(local_content or "{}")
+            if local_data:
+                global_data = {}
+                if global_auth.exists():
+                    try:
+                        global_content = global_auth.read_text().strip()
+                        global_data = json.loads(global_content or "{}")
+                    except json.JSONDecodeError:
+                        print(f"❌ Error: Global auth.json ({global_auth}) is not valid JSON.")
+                        sys.exit(1)
+                
+                # Check for conflicts (overlapping keys)
+                conflicts = set(local_data.keys()) & set(global_data.keys())
+                if conflicts:
+                    print(f"❌ Error: Conflict detected in auth.json!")
+                    print(f"The following keys already exist in your global config ({global_auth.resolve()}):")
+                    for k in conflicts:
+                        print(f"  - {k}")
+                    print(f"\nPlease manually resolve the conflict between:")
+                    print(f"  Local:  {local_auth.resolve()}")
+                    print(f"  Global: {global_auth.resolve()}")
+                    print(f"\nAfter merging, delete the local file and restart.")
+                    sys.exit(1)
+                
+                # No conflicts: Merge keys into global config
+                if global_data or not global_auth.exists():
+                    print(f"🔄 Merging workspace auth keys into global config: {global_auth}")
+                    updated_global = {**global_data, **local_data}
+                    global_auth.write_text(json.dumps(updated_global, indent=2))
+                
+                # Remove the local file so the mount can take over cleanly
+                local_auth.unlink()
+        except Exception as e:
+            # Re-raise SystemExit if it was triggered above
+            if isinstance(e, SystemExit): raise
+            print(f"⚠️ Warning: Failed to migrate auth.json: {e}")
+
+    # Proactively create shared auth if it doesn't exist
+    if not global_auth.exists():
+        global_auth.write_text("{}")
+
     # 2. Load Template & Config
     cfg = load_sidecar_config(work_dir, debug=args.debug)
     template_content = load_template()
@@ -159,6 +208,8 @@ def main():
         "-v", f"{work_dir}:/workspace:Z",
         "-v", f"{xdg_config}:{internal_home}/.config/opencode:Z",
         "-v", f"{ws_meta_dir}:{internal_home}/.local/share/opencode:Z",
+        # Shared Auth: Mount auth.json from global config to isolated local data dir
+        "-v", f"{global_auth}:{internal_home}/.local/share/opencode/auth.json:Z",
     ]
 
     # Add custom mounts
