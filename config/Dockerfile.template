@@ -20,11 +20,11 @@ RUN mkdir -p /home/developer/.config/opencode \
 USER developer
 WORKDIR /workspace
 
-# Install opencode using official method (as developer user)
-RUN curl -fsSL https://opencode.ai/install | bash
-
-# Workspace-specific packages (Optimized layering: adding packages here won't rebuild OpenCode)
+# Workspace-specific packages
 RUN if [ -n "{extra_packages}" ]; then sudo zypper --non-interactive install -y {extra_packages}; fi
+
+# Install opencode using official method (as developer user)
+RUN {install_script} 
 
 ENV PATH="/home/developer/.local/bin:${{PATH}}"
 ENV LANG=en_US.UTF-8
