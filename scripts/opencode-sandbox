@@ -113,9 +113,25 @@ def main():
     xdg_data = XDG_DATA_HOME / "opencode-sandbox"
     ws_meta_dir = xdg_data / f"ws-{ws_hash}"
     
+    # Isolated Workspace Config (to prevent instance conflicts)
+    ws_config_dir = ws_meta_dir / "config"
+
+    # Shared global assets
+    shared_config_dirs = ["modes"]
+    shared_config_files = []
+
     # Ensure host directories exist
     ws_meta_dir.mkdir(parents=True, exist_ok=True)
+    ws_config_dir.mkdir(parents=True, exist_ok=True)
     xdg_config.mkdir(parents=True, exist_ok=True)
+    
+    for d in shared_config_dirs:
+        (xdg_config / d).mkdir(parents=True, exist_ok=True)
+    
+    for f in shared_config_files:
+        p = xdg_config / f
+        if not p.exists():
+            p.write_text("{}") if f.endswith(".json") else p.touch()
 
     # Global and Local Auth paths
     global_auth = xdg_config / "auth.json"
@@ -236,11 +252,17 @@ def main():
         "--userns=keep-id",
         "--workdir", "/workspace",
         "-v", f"{work_dir}:/workspace:Z",
-        "-v", f"{xdg_config}:{internal_home}/.config/opencode:Z",
+        "-v", f"{ws_config_dir}:{internal_home}/.config/opencode:Z",
         "-v", f"{ws_meta_dir}:{internal_home}/.local/share/opencode:Z",
         # Shared Auth: Mount auth.json from global config to isolated local data dir
         "-v", f"{global_auth}:{internal_home}/.local/share/opencode/auth.json:Z",
     ]
+
+    # Add shared global config mounts
+    for d in shared_config_dirs:
+        podman_cmd.extend(["-v", f"{xdg_config / d}:{internal_home}/.config/opencode/{d}:Z"])
+    for f in shared_config_files:
+        podman_cmd.extend(["-v", f"{xdg_config / f}:{internal_home}/.config/opencode/{f}:Z"])
 
     # Add custom mounts
     for m in cfg.get("mounts", []):
