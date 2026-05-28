@@ -115,6 +115,7 @@ def main():
     
     # Isolated Workspace Config (to prevent instance conflicts)
     ws_config_dir = ws_meta_dir / "config"
+    ws_run_dir = ws_meta_dir / "run"
 
     # Shared global assets
     shared_config_dirs = ["modes"]
@@ -123,6 +124,7 @@ def main():
     # Ensure host directories exist
     ws_meta_dir.mkdir(parents=True, exist_ok=True)
     ws_config_dir.mkdir(parents=True, exist_ok=True)
+    ws_run_dir.mkdir(parents=True, exist_ok=True)
     xdg_config.mkdir(parents=True, exist_ok=True)
     
     for d in shared_config_dirs:
@@ -250,6 +252,7 @@ def main():
         "podman", "run", "-it", "--rm",
         "--name", f"opencode-{ws_hash}-{int(datetime.now().timestamp())}",
         "--userns=keep-id",
+        "--env", "XDG_RUNTIME_DIR=/home/developer/.local/share/opencode/run",
         "--workdir", "/workspace",
         "-v", f"{work_dir}:/workspace:Z",
         "-v", f"{ws_config_dir}:{internal_home}/.config/opencode:Z",
@@ -290,9 +293,19 @@ def main():
 
     podman_cmd.append(image_tag)
 
-    # If extra arguments are provided, append them to override the default CMD
-    if args.cmd_args:
-        podman_cmd.extend(args.cmd_args)
+    # 5. Determine and Wrap the Command
+    # We always run through a login shell to ensure PATH and environment are correct,
+    # and wrap in dbus-run-session to prevent multi-instance conflicts.
+    target_cmd = args.cmd_args if args.cmd_args else ["opencode"]
+    
+    # We use a single string for the bash -c command to ensure proper shell parsing
+    cmd_str = " ".join(f"'{arg}'" if " " in arg else arg for arg in target_cmd)
+    
+    wrapped_cmd = [
+        "/bin/bash", "--login", "-c",
+        f"dbus-run-session -- {cmd_str}"
+    ]
+    podman_cmd.extend(wrapped_cmd)
 
     if args.dry_run:
         print(f"\n[DRY RUN] Command:\n{' '.join(podman_cmd)}\n")
