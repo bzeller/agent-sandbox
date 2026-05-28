@@ -1,9 +1,8 @@
 FROM {base_image}
 
-# Install build-essential patterns and git
 RUN zypper --non-interactive refresh && \
     zypper --non-interactive install -y \
-    git-core sudo curl
+    sudo which curl dbus-1 git-core
 
 # Create a developer user (UID 1000) for rootless mapping
 RUN groupadd -g 1000 developer && \
@@ -30,4 +29,4 @@ ENV PATH="/home/developer/.local/bin:${{PATH}}"
 ENV LANG=en_US.UTF-8
 ENV TERM=xterm-256color
 
-CMD ["/bin/bash", "--login", "-i", "-c", "opencode"]
+CMD ["/bin/bash", "--login"]
