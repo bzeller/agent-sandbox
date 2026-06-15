@@ -2,7 +2,7 @@ FROM {base_image}
 
 RUN zypper --non-interactive refresh && \
     zypper --non-interactive install -y \
-    sudo which curl dbus-1 git-core
+    sudo which curl dbus-1 git-core dbus-1-daemon
 
 # Create a developer user (UID 1000) for rootless mapping
 RUN groupadd -g 1000 developer && \
