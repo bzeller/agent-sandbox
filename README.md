@@ -1,48 +1,56 @@
-# OpenCode Sandbox Manager
+# Agent Sandbox Manager (`agent-sandbox`)
 
-A Python-powered wrapper for **Rootless Podman** designed to provide isolated, project-specific development environments based on **openSUSE Tumbleweed**.
+A pluggable, distro-agnostic wrapper for **Rootless Podman** designed to provide isolated, project-specific development environments for various AI coding assistants (like **OpenCode**, **Aider**, and others).
 
-This tool allows you to spin up a sandboxed environment for your code in seconds, ensuring that your host system remains clean while your development tools (git, compilers, and zypper ecosystem) stay updated.
-
-## 🚀 Key Features
-
-* **XDG Compliance:** Respects `XDG_CONFIG_HOME` and `XDG_DATA_HOME`, falling back to `~/.config` and `~/.local/share` if unset.
-* **Hybrid Persistence:** 
-    * **Shared Auth:** LLM keys and global settings are shared across all sandboxes via `${XDG_CONFIG_HOME}/opencode-sandbox`.
-    * **Isolated Workspace Data:** Project history, indexing, and caches are isolated per project in `${XDG_DATA_HOME}/opencode-sandbox/ws-<hash>`.
-* **Template Resolution:** Flexible `Dockerfile.template` resolution (Highest to Lowest priority):
-    1.  `${XDG_CONFIG_HOME}/opencode-sandbox/Dockerfile.template`
-    2.  `config/Dockerfile.template` (Parent config directory)
-* **Sidecar Configuration:** Define your environment needs (base image, extra packages) per project using a `.opencode-sandbox.json` file.
-* **Symlink-Safe:** Designed to be installed in a tool directory and symlinked to your `~/bin` or `/usr/local/bin`.
-* **Rootless Podman:** No daemon, no root privileges, and native file permission mapping using `--userns=keep-id`.
+By utilizing a class-based runtime plugin system and dynamic, hierarchical template resolution, `agent-sandbox` ensures absolute isolation of workspace state, configurations, and cache, while seamlessly sharing global identities and authentication tokens.
 
 ---
 
-## 🛠️ Installation
+## 🚀 Key Features
+
+* **Multi-Plugin Support:** Easily run and switch between different AI coding tools (e.g., `opencode`, `aider`) in the same workspace.
+* **Symlink-Safe Auto-Detection:** Automatically executes the correct plugin when symlinked to your `PATH` (e.g., calling `aider-sandbox` runs Aider, `opencode-sandbox` runs OpenCode).
+* **Workspace Isolation:** Project session logs, metadata, and caches are completely isolated under `${XDG_DATA_HOME}/agent-sandbox/ws-<hash>/<plugin_name>`.
+* **Private D-Bus & Runtime Sessions:** Prevents multi-instance collisions (such as JS `GType` errors) by wrapping every command execution in a private `dbus-run-session` and an isolated `XDG_RUNTIME_DIR`.
+* **Hierarchical Customization:** Complete environment overrides from the global machine level down to individual workspace folders.
+
+---
+
+## 🛠️ Installation & Symlinks
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/youruser/opencode-sandbox.git ~/workspace/opencode-sandbox
+    git clone https://github.com/youruser/agent-sandbox.git ~/workspace/agent-sandbox
     ```
 
 2.  **Make the script executable:**
     ```bash
-    chmod +x ~/workspace/opencode-sandbox/scripts/opencode-sandbox
+    chmod +x ~/workspace/agent-sandbox/scripts/agent-sandbox
     ```
 
-3.  **Symlink to your Path:**
+3.  **Setup Symlinks for Auto-Detection:**
+    Create symlinks in your `PATH` (e.g., `~/bin` or `/usr/local/bin`). The script uses the calling binary's name to detect which plugin to launch:
     ```bash
     mkdir -p ~/bin
-    ln -s ~/workspace/opencode-sandbox/scripts/opencode-sandbox ~/bin/opencode-sandbox
+    ln -s ~/workspace/agent-sandbox/scripts/agent-sandbox ~/bin/opencode-sandbox
+    ln -s ~/workspace/agent-sandbox/scripts/agent-sandbox ~/bin/aider-sandbox
+    ln -s ~/workspace/agent-sandbox/scripts/agent-sandbox ~/bin/agent-sandbox
     ```
 
 ---
 
-## 📂 Project Configuration
+## 📂 Hierarchical Workspace Configurations
 
-Add a `.opencode-sandbox.json` file to any project directory to customize your sandbox:
+Each project workspace can cleanly organize its sandbox settings under a hidden folder `.{plugin_name}-sandbox/` without polluting your project root.
 
+### 1. Sidecar Config Resolution (Highest to Lowest)
+1.  **Workspace Directory Config (No Ext):** `.{plugin_name}-sandbox/config`
+2.  **Workspace Directory Config (JSON):** `.{plugin_name}-sandbox/config.json`
+3.  **Workspace Flat File:** `.{plugin_name}-sandbox.json`
+4.  **Generic Workspace Flat File:** `.agent-sandbox.json`
+5.  **Legacy Flat File:** `.opencode-sandbox.json` *(Backward compatibility)*
+
+#### Example sidecar configuration (`.aider-sandbox/config.json` or `.aider-sandbox/config`):
 ```json
 {
   "base_image": "opensuse/tumbleweed:latest",
@@ -59,60 +67,100 @@ Add a `.opencode-sandbox.json` file to any project directory to customize your s
 }
 ```
 
+### 2. Dockerfile Template Resolution (Highest to Lowest)
+If you need custom system packages or an entirely custom build for a project, you can place a custom template inside your workspace:
+1.  **Workspace Custom Template:** `.{plugin_name}-sandbox/Dockerfile.template`
+2.  **Global User Template:** `${XDG_CONFIG_HOME}/agent-sandbox/{plugin_name}.template`
+3.  **Legacy Global Fallback:** `${XDG_CONFIG_HOME}/opencode-sandbox/Dockerfile.template`
+4.  **Built-in Fallback:** `plugins/{plugin_name}/Dockerfile.template`
+
 ---
 
-## 📖 Usage
+## 🔌 Creating & Extending Plugins
 
-Run the sandbox from any directory:
+To add a new tool (e.g., `cline`), simply create a subdirectory inside the `plugins/` directory:
 
-```bash
-opencode-sandbox
+```
+plugins/
+└── cline/
+    ├── Dockerfile.template    # The default Dockerfile blueprint for Cline
+    └── plugin.py              # The Python class declaring paths, mounts, and commands
 ```
 
-### Options:
+#### Example Plugin Python Class (`plugins/cline/plugin.py`):
+```python
+from plugins.base import BasePlugin
+
+class Plugin(BasePlugin):
+    name = "cline"
+    github_repo = "cline/cline" # (Optional: used to track & run updates)
+    
+    # Machine namespaces on the host
+    host_config_subdir = "cline-sandbox"
+    host_data_subdir = "cline-sandbox"
+    image_prefix = "cline-ws"
+    container_prefix = "cline"
+    
+    # Default execution behaviors
+    default_cmd = ["cline"]
+    internal_config_dir = "/home/developer/.config/cline"
+    internal_data_dir = "/home/developer/.local/share/cline"
+    
+    # Dynamically mount global configuration files/dirs into container config
+    shared_config_dirs = []
+    shared_config_files = [".clinerc"]
+
+    def mount_config(self, podman_cmd, ws_meta_dir, xdg_config, global_auth, internal_home):
+        # Extend podman run mounts specifically for this plugin
+        for f in self.shared_config_files:
+            podman_cmd.extend(["-v", f"{xdg_config / f}:{internal_home}/{f}:Z"])
+```
+
+The main `agent-sandbox` orchestrator automatically scans, imports, and executes this plugin at runtime!
+
+---
+
+## 📖 Usage & Options
+
+Run the sandbox using any of your configured symlinks or CLI arguments:
+
+```bash
+# Launches default plugin (OpenCode) or the symlinked plugin
+opencode-sandbox
+aider-sandbox
+
+# Or explicitly select the plugin via CLI
+agent-sandbox --plugin aider
+```
+
+### Key Options:
 * `--rebuild`: Force an image rebuild.
-* `--root`: Run as root (default: developer user).
-* `--update`: Check for and install OpenCode updates within the workspace.
-* `--include-dir`: Include additional directory (HostPath:ContainerPath or just HostPath for auto-mount in /mnt).
-* `--debug`: Show debug information (paths, config, generated Dockerfile).
-* `--dry-run`: Show the podman command without executing it.
+* `--root`: Run the container as the root user.
+* `--update`: Check for and install the latest version of the plugin's tool from GitHub.
+* `--include-dir`: Include additional directory (HostPath:ContainerPath or just HostPath for auto-mount in `/mnt`).
+* `--debug`: Show paths, resolved sidecar config, generated Dockerfile, and podman commands.
+* `--dry-run`: Output the generated Podman command without executing it.
 
 ---
 
 ## 🐚 Custom Commands & Shell Access
 
-By default, running `opencode-sandbox` starts an interactive **OpenCode** session. However, you can pass any command to the container to override this behavior.
+You can append custom commands to the sandbox to bypass the default tool and execute packages, scripts, or debug the shell:
 
-### Run a specific OpenCode command:
-To run a specific message directly (non-interactive):
+### Run a specific direct command:
 ```bash
+aider-sandbox aider --help
 opencode-sandbox opencode run "Summarize this project"
 ```
 
-### Access a Bash shell:
-If you need to explore the environment or run manual commands:
+### Access an interactive Bash shell:
 ```bash
-opencode-sandbox /bin/bash
+aider-sandbox /bin/bash
 ```
 
 ### Mount extra directories via CLI:
 ```bash
-opencode-sandbox --include-dir ~/projects/shared-libs:/mnt/libs
-# Or auto-mounts to /mnt/my-data:
-opencode-sandbox --include-dir ~/my-data
+agent-sandbox --include-dir ~/projects/shared-libs:/mnt/libs
+# Auto-mounts to /mnt/my-data:
+agent-sandbox --include-dir ~/my-data
 ```
-
-### Run as Root:
-To perform system-wide changes or install packages:
-```bash
-opencode-sandbox --root zypper install -y htop
-```
-
-### Run other tools inside the sandbox:
-```bash
-opencode-sandbox zypper info cmake
-opencode-sandbox git status
-```
-
-> **Note:** When passing custom commands, if you need the environment from `~/.bashrc` (like the `PATH` for OpenCode), it's recommended to run them through a login shell:
-> `opencode-sandbox /bin/bash --login -c "your-command"`
