@@ -1,0 +1,34 @@
+FROM {base_image}
+
+# Install core system tools and resolve busybox conflicts
+RUN zypper --non-interactive refresh && \
+    zypper --non-interactive install -y gawk diffutils gettext-tools && \
+    zypper --non-interactive install -y \
+    sudo shadow which curl dbus-1
+
+# Create a developer user (UID 1000) for rootless mapping
+RUN groupadd -g 1000 developer && \
+    useradd -m -u 1000 -g developer -s /bin/bash developer && \
+    echo "developer ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+# Pre-create internal volume paths to avoid root ownership issues
+RUN mkdir -p /home/developer/.config/opencode \
+             /home/developer/.local/share/opencode \
+             /workspace && \
+    chown -R developer:developer /home/developer /workspace
+
+USER developer
+WORKDIR /workspace
+
+ENV PATH="/home/developer/.local/bin:${{PATH}}"
+
+# Workspace-specific packages
+RUN if [ -n "{extra_packages}" ]; then sudo zypper --non-interactive install -y {extra_packages}; fi
+
+# Install opencode using official method (as developer user)
+RUN curl -fsSL https://opencode.ai/install | bash
+
+ENV LANG=en_US.UTF-8
+ENV TERM=xterm-256color
+
+CMD ["/bin/bash", "--login"]

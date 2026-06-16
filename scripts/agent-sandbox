@@ -85,7 +85,10 @@ def load_sidecar_config(work_dir, plugin_name, debug=False):
     cfg = {
         "base_image": "opensuse/tumbleweed:latest",
         "install": [],
-        "mounts": []
+        "mounts": [],
+        "forward_env": [],
+        "set_env": {},
+        "ssh_auth_sock": False
     }
     if sidecar:
         try:
@@ -241,6 +244,29 @@ def main():
             podman_cmd.extend(["-v", f"{host_p}:{cont_p}:Z"])
         except KeyError as e:
             print(f"⚠️ Warning: Invalid mount configuration: missing {e}")
+
+    # Forward generic environment variables declared in sidecar
+    for env_var in cfg.get("forward_env", []):
+        if env_var in os.environ:
+            podman_cmd.extend(["--env", f"{env_var}={os.environ[env_var]}"])
+        elif args.debug:
+            print(f"DEBUG: '{env_var}' requested in forward_env but not set on the host.")
+
+    # Set static environment variables declared in sidecar
+    for k, v in cfg.get("set_env", {}).items():
+        podman_cmd.extend(["--env", f"{k}={v}"])
+
+    # Secure SSH Agent Forwarding (optional, specified in sidecar)
+    if cfg.get("ssh_auth_sock", False):
+        host_ssh_sock = os.environ.get("SSH_AUTH_SOCK")
+        if host_ssh_sock and Path(host_ssh_sock).exists():
+            container_ssh_sock = "/tmp/ssh-agent.sock"
+            podman_cmd.extend([
+                "-v", f"{host_ssh_sock}:{container_ssh_sock}:Z",
+                "--env", f"SSH_AUTH_SOCK={container_ssh_sock}"
+            ])
+        elif args.debug:
+            print("DEBUG: ssh_auth_sock enabled in config, but SSH_AUTH_SOCK is not set or valid on the host.")
 
     # Add extra directories from CLI
     if args.include_dir:
