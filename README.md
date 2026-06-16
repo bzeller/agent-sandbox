@@ -61,9 +61,18 @@ Each project workspace can cleanly organize its sandbox settings under a hidden 
     "python3-pip"
   ],
   "mounts": [
-    { "host": "~/.gitconfig", "container": "/home/developer/.gitconfig" },
-    { "host": "~/.ssh", "container": "/home/developer/.ssh" }
-  ]
+    { "host": "~/.gitconfig", "container": "/home/developer/.gitconfig" }
+  ],
+  "forward_env": [
+    "GH_TOKEN",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY"
+  ],
+  "set_env": {
+    "AIDER_DARK_MODE": "true",
+    "EDITOR": "vim"
+  },
+  "ssh_auth_sock": true
 }
 ```
 
