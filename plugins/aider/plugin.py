@@ -17,8 +17,11 @@ class Plugin(BasePlugin):
     shared_config_files = [".aider.conf.yml"]
 
     def get_update_command(self, latest_version):
-        return "curl -LsSf https://aider.chat/install.sh | sh"
+        # Force HTTPS-only and TLS 1.2+ to mitigate protocol-downgrade attacks.
+        # Pinning to a specific release with a checksum would be more secure;
+        # see the Dockerfile.template comment for details.
+        return "curl --proto '=https' --tlsv1.2 -fsSL https://aider.chat/install.sh | sh"
 
-    def mount_config(self, podman_cmd, ws_meta_dir, xdg_config, global_auth, internal_home):
+    def mount_config(self, podman_cmd, ws_meta_dir, xdg_config, internal_home):
         for f in self.shared_config_files:
             podman_cmd.extend(["-v", f"{xdg_config / f}:{internal_home}/{f}:Z"])

@@ -6,10 +6,13 @@ RUN zypper --non-interactive refresh && \
     zypper --non-interactive install -y \
     sudo shadow which curl dbus-1 dbus-1-daemon
 
-# Create a developer user (UID 1000) for rootless mapping
+# Create a developer user (UID 1000) for rootless mapping.
+# Passwordless sudo is scoped to zypper only (needed for package installs
+# in subsequent RUN steps) and is removed after all package installation
+# is complete, following the principle of least privilege.
 RUN groupadd -g 1000 developer && \
     useradd -m -u 1000 -g developer -s /bin/bash developer && \
-    echo "developer ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+    echo "developer ALL=(ALL) NOPASSWD: /usr/bin/zypper" >> /etc/sudoers
 
 # Pre-create internal volume paths to avoid root ownership issues
 RUN mkdir -p /home/developer/.config/opencode \
@@ -25,8 +28,25 @@ ENV PATH="/home/developer/.local/bin:${{PATH}}"
 # Workspace-specific packages
 RUN if [ -n "{extra_packages}" ]; then sudo zypper --non-interactive install -y {extra_packages}; fi
 
-# Install opencode using official method (as developer user)
-RUN curl -fsSL https://opencode.ai/install | bash
+# Install opencode using official method (as developer user).
+# NOTE: The upstream installer is downloaded over HTTPS and piped directly to
+# bash.  There is currently no published SHA-256 or GPG signature to verify
+# against.  Mitigations applied here:
+#   - --proto '=https'  forces HTTPS-only (no HTTP downgrade)
+#   - --tlsv1.2         disallows TLS < 1.2
+#   - --fail            aborts on HTTP error responses instead of silently
+#                       executing an error page
+# For production hardening, consider pinning to a specific release tarball
+# and verifying its checksum, e.g.:
+#   curl -fsSL https://github.com/anomalyco/opencode/releases/download/vX.Y.Z/opencode-linux-x86_64.tar.gz \
+#     | sha256sum --check <(echo "EXPECTED_HASH  -") && tar -xz ...
+RUN curl --proto '=https' --tlsv1.2 -fsSL https://opencode.ai/install | bash
+
+# Remove the zypper-only sudo rule now that all package installation is done.
+# The developer user no longer has any elevated privileges at runtime.
+USER root
+RUN sed -i '/developer.*zypper/d' /etc/sudoers
+USER developer
 
 ENV LANG=en_US.UTF-8
 ENV TERM=xterm-256color
