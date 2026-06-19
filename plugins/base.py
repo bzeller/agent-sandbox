@@ -126,39 +126,6 @@ class BasePlugin:
         except Exception as e:
             raise RuntimeError(f"Could not retrieve installed version: {e}")
 
-    def get_update_command(self, latest_version):
-        raise NotImplementedError()
-
-    def run_update(self, podman_cmd, image_tag, latest_v):
-        """Run the update command and commit the result back into image_tag.
-
-        The previous implementation reused the interactive podman_cmd which
-        included '--rm' (changes discarded on exit) and a unique '--name'
-        (collided with the helper name added here).
-
-        Steps:
-          1. Start a non-interactive helper container (no --rm, no inherited
-             --name, no workspace bind mounts) running the update script.
-          2. Commit the result onto the same image_tag so subsequent runs pick
-             up the updated binary without a full rebuild.
-          3. Remove the helper container (best effort).
-        """
-        import time
-        print(f"🔄 Updating {self.name} to v{latest_v}...")
-        # Strip interactive flags, the inherited --name, --rm, AND the bind
-        # mounts so installer writes are captured by the commit.
-        base_cmd = self._sanitise_podman_cmd(podman_cmd, drop_mounts=True)
-
-        helper_name = f"{self.name}-update-{int(time.time())}"
-        run_cmd = base_cmd + ["--name", helper_name, image_tag,
-                              "/bin/bash", "--login", "-c", self.get_update_command(latest_v)]
-        try:
-            subprocess.run(run_cmd, check=True)
-            subprocess.run(["podman", "commit", helper_name, image_tag], check=True)
-        finally:
-            subprocess.run(["podman", "rm", "-f", helper_name],
-                           capture_output=True)  # best-effort cleanup
-
     def initialize(self, ws_meta_dir, xdg_config):
         """Plugin initialization step to pre-create files, folders, or run migrations."""
         # Default generic implementation: pre-create shared config dirs & files
