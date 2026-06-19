@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
+import importlib.util
+import json
 import os
 import shlex
 import subprocess
 import sys
-import hashlib
-import json
 import urllib.request
-import importlib.util
 from datetime import datetime
 from pathlib import Path
 
@@ -21,6 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from plugins.base import version_tuple
 
+
 # XDG Compliance with fallbacks for empty or unset variables.
 # Validate that any explicitly set value is an absolute path to prevent an
 # attacker (or misconfigured environment) from redirecting config/credential
@@ -31,21 +32,25 @@ def _validated_xdg(env_var, default):
         return default
     p = Path(raw)
     if not p.is_absolute():
-        print(f"⚠️ Warning: {env_var}={raw!r} is not an absolute path — ignoring and using default.")
+        print(
+            f"⚠️ Warning: {env_var}={raw!r} is not an absolute path — ignoring and using default."
+        )
         return default
     return p
 
+
 XDG_CONFIG_HOME = _validated_xdg("XDG_CONFIG_HOME", Path.home() / ".config")
-XDG_DATA_HOME   = _validated_xdg("XDG_DATA_HOME",   Path.home() / ".local/share")
+XDG_DATA_HOME = _validated_xdg("XDG_DATA_HOME", Path.home() / ".local/share")
 
 # --- RUNTIME PLUGIN DETECTION ---
+
 
 def discover_plugins():
     plugins = {}
     plugins_dir = PROJECT_ROOT / "plugins"
     if not plugins_dir.exists():
         return plugins
-    
+
     for path in plugins_dir.iterdir():
         if path.is_dir():
             plugin_file = path / "plugin.py"
@@ -62,25 +67,30 @@ def discover_plugins():
                             plugin_instance = plugin_class()
                             plugins[plugin_instance.name] = plugin_instance
                     except Exception as e:
-                        print(f"⚠️ Warning: Failed to load plugin from {plugin_file}: {e}")
+                        print(
+                            f"⚠️ Warning: Failed to load plugin from {plugin_file}: {e}"
+                        )
     return plugins
+
 
 PLUGINS = discover_plugins()
 
 # --- RESOLUTION UTILITIES ---
+
 
 def find_template(work_dir, plugin_name):
     """Hierarchical resolution of the Dockerfile template."""
     possible_paths = [
         work_dir / f".{plugin_name}-sandbox" / "Dockerfile.template",
         XDG_CONFIG_HOME / "agent-sandbox" / f"{plugin_name}.template",
-        XDG_CONFIG_HOME / "opencode-sandbox" / "Dockerfile.template", # legacy fallback
-        PROJECT_ROOT / "plugins" / plugin_name / "Dockerfile.template"
+        XDG_CONFIG_HOME / "opencode-sandbox" / "Dockerfile.template",  # legacy fallback
+        PROJECT_ROOT / "plugins" / plugin_name / "Dockerfile.template",
     ]
     for p in possible_paths:
         if p.exists():
             return p
     return None
+
 
 # --- SIDECAR CONFIG TRUST MODEL ---
 #
@@ -150,7 +160,9 @@ def _read_json_config(path):
         with open(path, "r") as f:
             data = json.load(f)
         if not isinstance(data, dict):
-            print(f"⚠️ Warning: Ignoring config {path}: top-level value must be an object.")
+            print(
+                f"⚠️ Warning: Ignoring config {path}: top-level value must be an object."
+            )
             return {}
         return data
     except Exception as e:
@@ -158,28 +170,70 @@ def _read_json_config(path):
         return {}
 
 
-# --- WORKSPACE TRUST STORE (TOFU) ---
+# --- WORKSPACE TRUST STORE (TOFU, per-item) ---
 #
 # Privileged keys (mounts/forward_env/ssh_auth_sock) reach the host. They are
 # never honored from a workspace file *unless the user explicitly approves them*.
-# Approval is trust-on-first-use: we remember it keyed by the workspace config's
-# identity and a hash of *only its privileged content*. If that content later
-# changes (e.g. a git pull adds a mount), the old approval no longer matches and
-# the user is asked again — a silent escalation cannot ride in on a prior "yes".
+#
+# Approval is trust-on-first-use at the granularity of an individual ITEM (each
+# mount entry, each forward_env name, the ssh_auth_sock flag). The trust store
+# maps a workspace config path to the set of approved item fingerprints:
+#
+#     { "/path/to/.agent-sandbox.json": ["<sha256>", "<sha256>", ...] }
+#
+# On each run we honor items already in the set, prompt only for NEW items, and
+# prune the set to exactly the items present-and-approved this run. Consequences:
+#   * Adding or changing an item prompts only for that item.
+#   * Removing an item never prompts (it is a reduced privilege)…
+#   * …but it drops that item from the store, so RE-introducing it later prompts
+#     again — a revoked privilege cannot silently come back.
+
 
 def _trust_store_path():
     return XDG_CONFIG_HOME / "agent-sandbox" / "trusted_workspaces.json"
 
 
 def _privileged_subset(cfg):
-    """The privileged-only view of a config, for hashing/approval."""
+    """The privileged-only view of a config."""
     return {k: cfg[k] for k in sorted(PRIVILEGED_KEYS) if k in cfg}
 
 
-def _privileged_fingerprint(priv_subset):
-    """Stable hash of the privileged content the user is being asked to trust."""
-    canonical = json.dumps(priv_subset, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode()).hexdigest()
+def _privileged_items(priv_subset):
+    """Decompose a privileged subset into individual, independently-trustable items.
+
+    Privileged keys are list-valued (``mounts``, ``forward_env``) or a single
+    boolean (``ssh_auth_sock``). Each *element* is its own item so that adding,
+    removing, or changing a single element only affects that element's trust.
+    Duplicate elements (e.g. ``forward_env: ["A", "A"]``) naturally collapse to
+    one fingerprint, which is correct: trusting "forward A" covers all of them.
+
+    Precondition: ``priv_subset`` must already have passed
+    ``_validate_sidecar_cfg`` (every mount is a dict with 'host'/'container',
+    forward_env is a list of strings, etc.). This relies on that invariant and
+    does not re-check shapes; do not call it with unvalidated config.
+
+    Returns a list of (label, fingerprint) tuples in display order.
+    """
+    items = []
+
+    def fp(kind, value):
+        canonical = json.dumps([kind, value], sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode()).hexdigest()
+
+    for m in priv_subset.get("mounts", []):
+        label = f"bind-mount host path '{m['host']}'  →  container '{m['container']}'"
+        items.append((label, fp("mount", m)))
+
+    for env in priv_subset.get("forward_env", []):
+        label = f"forward host environment variable '{env}' into the container"
+        items.append((label, fp("forward_env", env)))
+
+    if priv_subset.get("ssh_auth_sock"):
+        items.append(
+            ("forward your SSH agent socket into the container", fp("ssh_auth_sock", True))
+        )
+
+    return items
 
 
 def _trust_key(config_path):
@@ -214,13 +268,22 @@ def _save_trust_store(store):
         pass
 
 
-def _is_workspace_trusted(config_path, fingerprint):
-    return _load_trust_store().get(_trust_key(config_path)) == fingerprint
+def _load_approved_fingerprints(config_path):
+    """The set of individually-approved item fingerprints for a config path."""
+    entry = _load_trust_store().get(_trust_key(config_path))
+    if isinstance(entry, list):
+        return set(entry)
+    return set()
 
 
-def _remember_workspace_trust(config_path, fingerprint):
+def _store_approved_fingerprints(config_path, fingerprints):
+    """Persist the approved item fingerprints for a config path (or drop the entry)."""
     store = _load_trust_store()
-    store[_trust_key(config_path)] = fingerprint
+    key = _trust_key(config_path)
+    if fingerprints:
+        store[key] = sorted(fingerprints)
+    else:
+        store.pop(key, None)
     _save_trust_store(store)
 
 
@@ -232,94 +295,150 @@ def _forget_workspace_trust(config_path):
     return False
 
 
-def _describe_privileged_request(priv_subset):
-    """Human-readable rendering of exactly what the workspace is requesting."""
-    lines = []
-    for m in priv_subset.get("mounts", []):
-        host = m.get("host", "?")
-        cont = m.get("container", "?")
-        lines.append(f"    • bind-mount host path '{host}'  →  container '{cont}'")
-    for env in priv_subset.get("forward_env", []):
-        lines.append(f"    • forward host environment variable '{env}' into the container")
-    if priv_subset.get("ssh_auth_sock"):
-        lines.append("    • forward your SSH agent socket into the container")
-    return "\n".join(lines)
+def _resolve_privileged_trust(
+    config_path, priv_subset, trust_flag, debug=False, dry_run=False
+):
+    """Return the set of approved item fingerprints to honor for this config.
 
+    Per-item trust-on-first-use:
+      * Items whose fingerprint is already stored are honored without a prompt.
+      * Only items NOT yet approved trigger a prompt (or are granted by
+        --trust-workspace). Approving adds just those items to the store.
+      * The stored set is pruned to exactly the items present-and-approved this
+        run, so REMOVING an item revokes its approval and RE-ADDING it later
+        re-prompts (a reduced privilege never re-prompts; a re-introduced one
+        does).
 
-def _prompt_workspace_trust(config_path, priv_subset, trust_flag, debug=False, dry_run=False):
-    """Decide whether to honor a workspace file's privileged keys.
+    Under --dry-run nothing is persisted (preview must be side-effect-free):
+    already-approved items are honored, not-yet-approved items are shown but
+    treated as denied for the preview.
 
-    Returns True to honor them, False to drop them.
-
-    Order of resolution:
-      1. already-remembered approval matching the current content → honor
-      2. --trust-workspace flag                                   → honor + remember
-      3. interactive TTY                                          → ask; remember on yes
-      4. non-interactive, no flag                                 → deny (drop)
-
-    During --dry-run we never prompt and never persist (a preview must be
-    side-effect-free): an already-trusted config is honored, anything else is
-    dropped with a note.
+    Returns the set of fingerprints that should be honored this run.
     """
-    fingerprint = _privileged_fingerprint(priv_subset)
+    items = _privileged_items(priv_subset)
+    all_fps = {fp for _, fp in items}
+    previously_approved = _load_approved_fingerprints(config_path)
 
-    if _is_workspace_trusted(config_path, fingerprint):
-        if debug:
-            print(f"DEBUG: workspace privileged keys previously approved for {config_path}")
-        return True
+    already = {fp for fp in all_fps if fp in previously_approved}
+    new_items = [(label, fp) for (label, fp) in items if fp not in previously_approved]
 
-    requested = _describe_privileged_request(priv_subset)
+    def _describe(item_list):
+        return "\n".join(f"    • {label}" for label, _ in item_list)
 
-    # --trust-workspace: honor explicitly. Persist the approval only on a real
-    # run (a dry-run must not write to the trust store).
+    # Nothing new to approve: honor the already-approved items. Prune the store
+    # to the currently-present approved set (drops removed items).
+    if not new_items:
+        if not dry_run:
+            _store_approved_fingerprints(config_path, already)
+        if debug and already:
+            print(
+                f"DEBUG: all requested privileged items previously approved for {config_path}"
+            )
+        return already
+
+    requested = _describe(new_items)
+
+    # --trust-workspace: grant the new items explicitly.
     if trust_flag:
+        granted = already | {fp for _, fp in new_items}
         if dry_run:
-            print(f"ℹ️  [dry-run] Would trust workspace privileged config (per --trust-workspace):\n{requested}")
-        else:
-            _remember_workspace_trust(config_path, fingerprint)
-            print(f"✅ Trusting workspace privileged config (per --trust-workspace):\n{requested}")
-        return True
+            # Preview WITH the items honored (so the previewed command reflects
+            # what --trust-workspace would do), but do not persist the approval.
+            print(
+                f"ℹ️  [dry-run] Would trust new workspace privileged item(s) "
+                f"(per --trust-workspace):\n{requested}"
+            )
+            return granted
+        _store_approved_fingerprints(config_path, granted)
+        print(
+            f"✅ Trusting new workspace privileged item(s) (per --trust-workspace):\n{requested}"
+        )
+        return granted
 
-    # No prior approval and no explicit flag.  A dry-run must neither prompt nor
-    # persist, so show the command without the privileged parts.
+    # Dry-run, not pre-approved: show but do not prompt/persist.
     if dry_run:
         print(
-            "ℹ️  [dry-run] Workspace requests host-level access (not yet trusted); "
+            "ℹ️  [dry-run] Workspace requests host-level access not yet trusted; "
             "it would be prompted for on a real run. Showing command WITHOUT it:\n"
             f"{requested}"
         )
-        return False
+        return already
 
     # Interactive consent only if we actually have a terminal to ask at.
     if sys.stdin.isatty() and sys.stdout.isatty():
         print(
-            "\n⚠️  This workspace's config requests HOST-LEVEL access from inside the sandbox:\n"
+            "\n⚠️  This workspace's config requests NEW host-level access from inside the sandbox:\n"
             f"{requested}\n"
             f"   Source: {config_path}\n"
             "   These reach OUT of the sandbox to your host. Only approve if you trust this workspace."
         )
         try:
-            answer = input("   Trust this workspace and grant the above? [y/N]: ").strip().lower()
+            answer = (
+                input("   Trust this workspace and grant the above? [y/N]: ")
+                .strip()
+                .lower()
+            )
         except (EOFError, KeyboardInterrupt):
             print("\n   No response — denying.")
-            return False
+            # Persist pruning of removed items even on denial of new ones.
+            _store_approved_fingerprints(config_path, already)
+            return already
         if answer in ("y", "yes"):
-            _remember_workspace_trust(config_path, fingerprint)
+            granted = already | {fp for _, fp in new_items}
+            _store_approved_fingerprints(config_path, granted)
             print("   Approved and remembered (will re-ask if the request changes).")
-            return True
-        print("   Denied — privileged keys ignored for this run.")
-        return False
+            return granted
+        print("   Denied — new privileged items ignored for this run.")
+        _store_approved_fingerprints(config_path, already)
+        return already
 
-    # Non-interactive and not explicitly trusted: deny by default.
+    # Non-interactive and not explicitly trusted: deny the new items by default.
+    labels = ", ".join(label for label, _ in new_items)
     print(
-        f"⚠️  SECURITY: workspace config {config_path} requests host-level access "
-        f"({', '.join(sorted(priv_subset))}) but no terminal is available to confirm. "
-        f"Ignoring these keys. Re-run interactively or pass --trust-workspace to approve."
+        f"⚠️  SECURITY: workspace config {config_path} requests new host-level access "
+        f"({labels}) but no terminal is available to confirm. "
+        f"Ignoring those item(s). Re-run interactively or pass --trust-workspace to approve."
     )
-    return False
+    if not dry_run:
+        _store_approved_fingerprints(config_path, already)
+    return already
 
 
-def load_sidecar_config(work_dir, plugin_name, debug=False, trust_flag=False, dry_run=False):
+def _filter_priv_subset_by_fingerprints(priv_subset, approved_fps):
+    """Rebuild a privileged subset containing only individually-approved items.
+
+    Built from the *current* config (preserving element order and duplicates),
+    keeping only elements whose fingerprint is in ``approved_fps``.
+
+    Precondition: ``priv_subset`` must already have passed
+    ``_validate_sidecar_cfg`` (same shape invariant as ``_privileged_items``).
+    """
+
+    def fp(kind, value):
+        canonical = json.dumps([kind, value], sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode()).hexdigest()
+
+    result = {}
+
+    mounts = [m for m in priv_subset.get("mounts", []) if fp("mount", m) in approved_fps]
+    if mounts:
+        result["mounts"] = mounts
+
+    envs = [
+        e for e in priv_subset.get("forward_env", []) if fp("forward_env", e) in approved_fps
+    ]
+    if envs:
+        result["forward_env"] = envs
+
+    if priv_subset.get("ssh_auth_sock") and fp("ssh_auth_sock", True) in approved_fps:
+        result["ssh_auth_sock"] = True
+
+    return result
+
+
+def load_sidecar_config(
+    work_dir, plugin_name, debug=False, trust_flag=False, dry_run=False
+):
     """Resolve sidecar configuration using the trust-tiered model.
 
     Layering (lowest precedence first):
@@ -357,20 +476,38 @@ def load_sidecar_config(work_dir, plugin_name, debug=False, trust_flag=False, dr
                 print(f"❌ Error: Invalid workspace config in {wp}: {e}")
                 sys.exit(1)
 
-            unknown = sorted(k for k in workspace if k not in SAFE_KEYS and k not in PRIVILEGED_KEYS)
+            unknown = sorted(
+                k for k in workspace if k not in SAFE_KEYS and k not in PRIVILEGED_KEYS
+            )
             if unknown and debug:
-                print(f"DEBUG: Ignoring unknown key(s) in workspace config: {', '.join(unknown)}")
+                print(
+                    f"DEBUG: Ignoring unknown key(s) in workspace config: {', '.join(unknown)}"
+                )
 
             # Safe keys: always honored.
             safe_subset = {k: v for k, v in workspace.items() if k in SAFE_KEYS}
             cfg.update(safe_subset)
 
-            # Privileged keys: only honored if approved (TOFU).
+            # Privileged keys: honored per-item, only for items the user has
+            # approved (trust-on-first-use). _resolve_privileged_trust handles
+            # prompting for new items, pruning removed ones, and persistence
+            # (subject to --dry-run). We then merge in only the approved items.
             priv_subset = _privileged_subset(workspace)
             if priv_subset:
-                if _prompt_workspace_trust(wp, priv_subset, trust_flag,
-                                           debug=debug, dry_run=dry_run):
-                    cfg.update(priv_subset)
+                approved_fps = _resolve_privileged_trust(
+                    wp, priv_subset, trust_flag, debug=debug, dry_run=dry_run
+                )
+                honored = _filter_priv_subset_by_fingerprints(priv_subset, approved_fps)
+                if honored:
+                    cfg.update(honored)
+            else:
+                # No privileged keys currently requested. Drop any stored
+                # approvals for this config so that re-introducing a privileged
+                # item later forces a fresh prompt. (Persistence skipped under
+                # --dry-run to keep previews side-effect-free.)
+                if not dry_run:
+                    _forget_workspace_trust(wp)
+
 
             if debug:
                 print(f"📦 Loaded workspace config: {wp}")
@@ -415,7 +552,9 @@ def _validate_sidecar_cfg(cfg, allow_privileged=True):
     # install (SAFE): just needs to be a list of strings.
     if "install" in cfg:
         install = cfg["install"]
-        if not isinstance(install, list) or not all(isinstance(p, str) for p in install):
+        if not isinstance(install, list) or not all(
+            isinstance(p, str) for p in install
+        ):
             raise ValueError("'install' must be a list of strings.")
 
     # set_env (SAFE): dict of string → string.
@@ -434,20 +573,25 @@ def _validate_sidecar_cfg(cfg, allow_privileged=True):
             raise ValueError("'mounts' must be a list.")
         for m in mounts:
             if not isinstance(m, dict):
-                raise ValueError("Each entry in 'mounts' must be an object with 'host' and 'container' keys.")
+                raise ValueError(
+                    "Each entry in 'mounts' must be an object with 'host' and 'container' keys."
+                )
             if "host" not in m or "container" not in m:
                 raise ValueError("Each mount must have 'host' and 'container' keys.")
 
     # forward_env (PRIVILEGED): list of strings.
     if "forward_env" in cfg:
         forward_env = cfg["forward_env"]
-        if not isinstance(forward_env, list) or not all(isinstance(e, str) for e in forward_env):
+        if not isinstance(forward_env, list) or not all(
+            isinstance(e, str) for e in forward_env
+        ):
             raise ValueError("'forward_env' must be a list of strings.")
 
     # ssh_auth_sock (PRIVILEGED): boolean.
     if "ssh_auth_sock" in cfg:
         if not isinstance(cfg["ssh_auth_sock"], bool):
             raise ValueError("'ssh_auth_sock' must be a boolean.")
+
 
 def _validate_container_path(path_str, source="sidecar"):
     """Validate and normalise a container-side mount destination.
@@ -479,8 +623,18 @@ def _looks_like_secret_env(name):
     mean to?" sanity check, not the primary defense (that is the trust prompt).
     """
     upper = name.upper()
-    needles = ("SECRET", "TOKEN", "PASSWORD", "PASSWD", "APIKEY", "API_KEY",
-               "ACCESS_KEY", "PRIVATE_KEY", "CREDENTIAL", "AUTH")
+    needles = (
+        "SECRET",
+        "TOKEN",
+        "PASSWORD",
+        "PASSWD",
+        "APIKEY",
+        "API_KEY",
+        "ACCESS_KEY",
+        "PRIVATE_KEY",
+        "CREDENTIAL",
+        "AUTH",
+    )
     return any(n in upper for n in needles)
 
 
@@ -497,8 +651,16 @@ def _warn_if_sensitive_host_mount(host_path, source="sidecar"):
         return
     home = Path.home().resolve()
     sensitive_names = {
-        ".ssh", ".aws", ".gnupg", ".config", ".kube", ".docker",
-        ".netrc", ".npmrc", ".pypirc", ".git-credentials",
+        ".ssh",
+        ".aws",
+        ".gnupg",
+        ".config",
+        ".kube",
+        ".docker",
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        ".git-credentials",
     }
     is_sensitive = False
     reason = ""
@@ -587,7 +749,9 @@ def migrate_legacy_workspace_dir(xdg_data, work_dir):
         try:
             new_dir.rmdir()  # only succeeds if empty — intentional
         except OSError as e:
-            print(f"⚠️ Warning: Could not clear stale {new_dir.name} before migration: {e}")
+            print(
+                f"⚠️ Warning: Could not clear stale {new_dir.name} before migration: {e}"
+            )
             return new_dir
 
     print(f"🔄 Upgrading workspace hash namespace: {old_dir.name} ➔ {new_dir.name}")
@@ -597,7 +761,9 @@ def migrate_legacy_workspace_dir(xdg_data, work_dir):
         print(f"⚠️ Warning: Failed to migrate legacy workspace meta directory: {e}")
     return new_dir
 
+
 # --- MAIN ORCHESTRATOR ---
+
 
 def main():
     if not PLUGINS:
@@ -616,22 +782,48 @@ def main():
             break
 
     parser = argparse.ArgumentParser(description="Agent Sandbox (Podman + openSUSE)")
-    parser.add_argument("--plugin", "-p", choices=list(PLUGINS.keys()), default=default_plugin, help="The sandbox plugin to launch")
+    parser.add_argument(
+        "--plugin",
+        "-p",
+        choices=list(PLUGINS.keys()),
+        default=default_plugin,
+        help="The sandbox plugin to launch",
+    )
     parser.add_argument("--rebuild", action="store_true", help="Force image rebuild")
-    parser.add_argument("--dry-run", action="store_true", help="Show command without running")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Show command without running"
+    )
     parser.add_argument("--debug", action="store_true", help="Show debug information")
     parser.add_argument("--root", action="store_true", help="Run container as root")
-    parser.add_argument("--update", action="store_true", help="Check for and install updates for the plugin")
-    parser.add_argument("--include-dir", action="append", help="Include additional directory in /mnt (HostPath:ContainerPath or just HostPath)")
-    parser.add_argument("--trust-workspace", action="store_true",
-                        help="Approve privileged keys (mounts/forward_env/ssh_auth_sock) in this workspace's config without prompting, and remember the approval")
-    parser.add_argument("--forget-workspace-trust", action="store_true",
-                        help="Forget any remembered trust approval for this workspace's config, then exit")
-    parser.add_argument("cmd_args", nargs=argparse.REMAINDER, help="Arguments to pass to the plugin tool")
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="Check for and install updates for the plugin",
+    )
+    parser.add_argument(
+        "--include-dir",
+        action="append",
+        help="Include additional directory in /mnt (HostPath:ContainerPath or just HostPath)",
+    )
+    parser.add_argument(
+        "--trust-workspace",
+        action="store_true",
+        help="Approve privileged keys (mounts/forward_env/ssh_auth_sock) in this workspace's config without prompting, and remember the approval",
+    )
+    parser.add_argument(
+        "--forget-workspace-trust",
+        action="store_true",
+        help="Forget any remembered trust approval for this workspace's config, then exit",
+    )
+    parser.add_argument(
+        "cmd_args",
+        nargs=argparse.REMAINDER,
+        help="Arguments to pass to the plugin tool",
+    )
     args = parser.parse_args()
 
     plugin = PLUGINS[args.plugin]
-    
+
     # 1. Resolve Paths & Configuration
     work_dir = Path.cwd().resolve()
 
@@ -671,19 +863,26 @@ def main():
     plugin.initialize(ws_meta_dir, xdg_config)
 
     # Load sidecar configuration
-    cfg = load_sidecar_config(work_dir, plugin.name, debug=args.debug,
-                              trust_flag=args.trust_workspace, dry_run=args.dry_run)
+    cfg = load_sidecar_config(
+        work_dir,
+        plugin.name,
+        debug=args.debug,
+        trust_flag=args.trust_workspace,
+        dry_run=args.dry_run,
+    )
     template_content = template_path.read_text()
-    
+
     # Render Dockerfile
     dockerfile_content = template_content.format(
-        base_image=cfg.get('base_image', 'opensuse/tumbleweed:latest'),
-        extra_packages=" ".join(shlex.quote(p) for p in cfg.get('install', []))
+        base_image=cfg.get("base_image", "opensuse/tumbleweed:latest"),
+        extra_packages=" ".join(shlex.quote(p) for p in cfg.get("install", [])),
     )
 
     if args.dry_run or args.debug:
         print(f"--- RESOLVED TEMPLATE: {template_path.resolve()} ---")
-        print(f"--- GENERATED DOCKERFILE ---\n{dockerfile_content}\n----------------------------")
+        print(
+            f"--- GENERATED DOCKERFILE ---\n{dockerfile_content}\n----------------------------"
+        )
 
     # 2. Image Versioning — use SHA-256 (not MD5) with a 12-char prefix for
     # sufficient collision resistance (48 bits vs the original 32 bits).
@@ -698,8 +897,32 @@ def main():
     # decisions.
     content_hash = hashlib.sha256(dockerfile_content.encode()).hexdigest()[:12]
     image_tag = f"localhost/{plugin.image_prefix}:{ws_hash}-{content_hash}"
-    
-    image_check = subprocess.run(["podman", "images", "-q", image_tag], capture_output=True).stdout
+
+    image_check = subprocess.run(
+        ["podman", "images", "-q", image_tag], capture_output=True
+    ).stdout
+
+    tool_version = "latest"
+    if args.update:
+        if not image_check:
+            print(f"ℹ️ Workspace image does not exist yet — building fresh which installs the latest version.")
+            args.rebuild = True
+        else:
+            latest_v = plugin.get_latest_version(debug=args.debug)
+            if not latest_v:
+                print(f"⚠️ Skipping update: Could not fetch latest version info for {plugin.name}.")
+            else:
+                try:
+                    current_v = plugin.get_installed_version(None, image_tag)
+                    if version_tuple(current_v) >= version_tuple(latest_v):
+                        print(f"✅ {plugin.name} is already up to date (v{current_v}).")
+                    else:
+                        print(f"🔄 Upgrading {plugin.name}: v{current_v} -> v{latest_v}...")
+                        tool_version = latest_v
+                        args.rebuild = True
+                except Exception as e:
+                    print(f"⚠️ Warning: Could not verify versions: {e}. Rebuilding to ensure latest version.")
+                    args.rebuild = True
 
     if not image_check or args.rebuild:
         print(f"🔨 Building workspace image: {image_tag}")
@@ -713,8 +936,18 @@ def main():
             # workspace files.  The generated Dockerfile lives in ws_meta_dir
             # and needs no files from outside it.
             subprocess.run(
-                ["podman", "build", "-t", image_tag, "-f", str(df_path), str(ws_meta_dir)],
-                check=True
+                [
+                    "podman",
+                    "build",
+                    "-t",
+                    image_tag,
+                    "-f",
+                    str(df_path),
+                    "--build-arg",
+                    f"TOOL_VERSION={tool_version}",
+                    str(ws_meta_dir),
+                ],
+                check=True,
             )
         except subprocess.CalledProcessError as e:
             print(f"❌ Error: 'podman build' failed for {image_tag}")
@@ -726,14 +959,23 @@ def main():
     # 3. Execute Sandbox Setup
     internal_home = "/home/developer"
     podman_cmd = [
-        "podman", "run", "-it", "--rm",
-        "--name", f"{plugin.container_prefix}-{ws_hash}-{int(datetime.now().timestamp())}",
+        "podman",
+        "run",
+        "-it",
+        "--rm",
+        "--name",
+        f"{plugin.container_prefix}-{ws_hash}-{int(datetime.now().timestamp())}",
         "--userns=keep-id",
-        "--env", f"XDG_RUNTIME_DIR={plugin.internal_data_dir}/run",
-        "--workdir", "/workspace",
-        "-v", f"{work_dir}:/workspace:Z",
-        "-v", f"{ws_config_dir}:{plugin.internal_config_dir}:Z",
-        "-v", f"{ws_meta_dir}:{plugin.internal_data_dir}:Z",
+        "--env",
+        f"XDG_RUNTIME_DIR={plugin.internal_data_dir}/run",
+        "--workdir",
+        "/workspace",
+        "-v",
+        f"{work_dir}:/workspace:Z",
+        "-v",
+        f"{ws_config_dir}:{plugin.internal_config_dir}:Z",
+        "-v",
+        f"{ws_meta_dir}:{plugin.internal_data_dir}:Z",
     ]
 
     # Let the plugin append its own configuration mounts
@@ -760,7 +1002,9 @@ def main():
                 )
             podman_cmd.extend(["--env", f"{env_var}={os.environ[env_var]}"])
         elif args.debug:
-            print(f"DEBUG: '{env_var}' requested in forward_env but not set on the host.")
+            print(
+                f"DEBUG: '{env_var}' requested in forward_env but not set on the host."
+            )
 
     # Set static environment variables declared in sidecar
     for k, v in cfg.get("set_env", {}).items():
@@ -771,12 +1015,18 @@ def main():
         host_ssh_sock = os.environ.get("SSH_AUTH_SOCK")
         if host_ssh_sock and Path(host_ssh_sock).exists():
             container_ssh_sock = "/tmp/ssh-agent.sock"
-            podman_cmd.extend([
-                "-v", f"{host_ssh_sock}:{container_ssh_sock}:Z",
-                "--env", f"SSH_AUTH_SOCK={container_ssh_sock}"
-            ])
+            podman_cmd.extend(
+                [
+                    "-v",
+                    f"{host_ssh_sock}:{container_ssh_sock}:Z",
+                    "--env",
+                    f"SSH_AUTH_SOCK={container_ssh_sock}",
+                ]
+            )
         elif args.debug:
-            print("DEBUG: ssh_auth_sock enabled in config, but SSH_AUTH_SOCK is not set or valid on the host.")
+            print(
+                "DEBUG: ssh_auth_sock enabled in config, but SSH_AUTH_SOCK is not set or valid on the host."
+            )
 
     # Add extra directories from CLI
     if args.include_dir:
@@ -799,26 +1049,9 @@ def main():
     if args.root:
         podman_cmd.extend(["--user", "root"])
 
-    # Handle UPDATE
-    if args.update:
-        latest_v = plugin.get_latest_version(debug=args.debug)
-        if not latest_v:
-            print(f"⚠️ Skipping update: Could not fetch latest version info for {plugin.name}.")
-        else:
-            try:
-                current_v = plugin.get_installed_version(podman_cmd, image_tag)
-                if version_tuple(current_v) >= version_tuple(latest_v):
-                    print(f"✅ {plugin.name} is already up to date (v{current_v}).")
-                else:
-                    plugin.run_update(podman_cmd, image_tag, latest_v)
-                    print(f"✨ Update complete! (Note: The update is persistent in your workspace data directory)")
-            except Exception as e:
-                print(f"⚠️ Warning: Could not verify versions: {e}. Attempting update anyway.")
-                plugin.run_update(podman_cmd, image_tag, latest_v)
-
     # Normal Execution
     podman_cmd.append(image_tag)
-    
+
     # Wrap target command in login shell and private D-Bus session.
     # shlex.quote() is applied to every argument unconditionally so that
     # shell metacharacters (backticks, $(), ;, &&, |, quotes …) cannot
@@ -826,21 +1059,23 @@ def main():
     target_cmd = args.cmd_args if args.cmd_args else plugin.default_cmd
     cmd_str = " ".join(shlex.quote(arg) for arg in target_cmd)
 
-    wrapped_cmd = [
-        "/bin/bash", "--login", "-c",
-        f"dbus-run-session -- {cmd_str}"
-    ]
+    wrapped_cmd = ["/bin/bash", "--login", "-c", f"dbus-run-session -- {cmd_str}"]
     podman_cmd.extend(wrapped_cmd)
 
     if args.dry_run:
         print(f"\n[DRY RUN] Command:\n{' '.join(podman_cmd)}\n")
     else:
-        print(f"🚀 Sandbox Active | Plugin: {plugin.name} | Project: {work_dir.name} ({ws_hash})")
+        print(
+            f"🚀 Sandbox Active | Plugin: {plugin.name} | Project: {work_dir.name} ({ws_hash})"
+        )
         if is_first_run:
-            print(f"💡 First run for this workspace: {plugin.name} may perform a one-time database migration. Please wait...")
+            print(
+                f"💡 First run for this workspace: {plugin.name} may perform a one-time database migration. Please wait..."
+            )
         if args.debug:
             print(f"DEBUG: podman_cmd={' '.join(podman_cmd)}")
         subprocess.run(podman_cmd)
+
 
 if __name__ == "__main__":
     main()

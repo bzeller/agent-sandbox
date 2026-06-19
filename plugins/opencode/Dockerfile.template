@@ -28,6 +28,9 @@ ENV PATH="/home/developer/.local/bin:${{PATH}}"
 # Workspace-specific packages
 RUN if [ -n "{extra_packages}" ]; then sudo zypper --non-interactive install -y {extra_packages}; fi
 
+# Cache-breaker for pluggable tool installation (rebuilds only from here down on update)
+ARG TOOL_VERSION=latest
+
 # Install opencode using official method (as developer user).
 # NOTE: The upstream installer is downloaded over HTTPS and piped directly to
 # bash.  There is currently no published SHA-256 or GPG signature to verify

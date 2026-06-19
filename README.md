@@ -54,15 +54,18 @@ A workspace directory can be a freshly cloned, untrusted repo — yet it's the v
 
 The reasoning: a bad package or base image can only compromise the throwaway sandbox, which is already untrusted — so projects may declare these freely. But bind-mounting host paths, forwarding host environment variables (secrets!), or forwarding your SSH agent punch holes *through* the sandbox to your host.
 
-**How privileged keys in a workspace file are handled** (trust-on-first-use, like `direnv`/SSH):
+**How privileged keys in a workspace file are handled** (per-item trust-on-first-use, like `direnv`/SSH):
 
-1. The first time a workspace config requests privileged access, you are shown exactly what it wants (which mounts / env vars / the SSH agent) and asked to approve: `Trust this workspace and grant the above? [y/N]`.
-2. If you approve, the decision is **remembered**, keyed to a hash of *just the privileged part* of that config. Subsequent runs are silent.
-3. If that privileged request later changes (e.g. a `git pull` adds a mount), the remembered approval no longer matches and **you are asked again** — a silent escalation cannot ride in on a previous "yes".
-4. **Non-interactively** (no TTY, e.g. CI) privileged keys are **denied by default**; pass `--trust-workspace` to approve without a prompt.
-5. Under `--dry-run` you are never prompted and nothing is persisted; an already-trusted config is honored, otherwise the previewed command omits the privileged parts.
+Trust is tracked at the granularity of an **individual item** — each mount entry, each `forward_env` name, and the `ssh_auth_sock` flag are approved independently.
 
-Approvals are stored in `${XDG_CONFIG_HOME}/agent-sandbox/trusted_workspaces.json` (mode `0600`). Use `--forget-workspace-trust` (run from the workspace) to revoke a prior approval.
+1. The first time a workspace config requests a privileged item, you are shown exactly what it wants and asked to approve: `Trust this workspace and grant the above? [y/N]`.
+2. Approving stores a fingerprint **per item**. Subsequent runs honor already-approved items silently and **prompt only for items you haven't approved yet**.
+3. **Adding or changing** an item (e.g. a `git pull` adds a mount, or changes a mount's host path) prompts only for that new/changed item; previously approved items stay trusted.
+4. **Removing** an item never prompts (it's a reduced privilege) — but it also drops that item from the store, so **re-introducing it later prompts again**. A revoked privilege cannot silently come back.
+5. **Non-interactively** (no TTY, e.g. CI) not-yet-approved items are **denied by default**; pass `--trust-workspace` to approve them without a prompt.
+6. Under `--dry-run` nothing is persisted; already-approved items are honored, and the preview shows what new items *would* require approval.
+
+Approvals are stored in `${XDG_CONFIG_HOME}/agent-sandbox/trusted_workspaces.json` (mode `0600`) as a set of approved item fingerprints per config path. Use `--forget-workspace-trust` (run from the workspace) to clear all approvals for that workspace.
 
 Alternatively, put privileged keys in **trusted config** under your own `${XDG_CONFIG_HOME}` (no prompt ever, since you own these files), least → most specific:
 1. `${XDG_CONFIG_HOME}/agent-sandbox/config.json`
