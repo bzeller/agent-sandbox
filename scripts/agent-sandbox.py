@@ -437,6 +437,26 @@ def _filter_priv_subset_by_fingerprints(priv_subset, approved_fps):
     return result
 
 
+def _merge_config(dest, src):
+    """Perform a deep-ish merge of src into dest for specific config keys."""
+    for k, v in src.items():
+        if k in ("install", "mounts", "forward_env"):
+            if k not in dest or not isinstance(dest[k], list):
+                dest[k] = []
+            if isinstance(v, list):
+                for item in v:
+                    if item not in dest[k]:
+                        dest[k].append(item)
+        elif k == "set_env":
+            if k not in dest or not isinstance(dest[k], dict):
+                dest[k] = {}
+            if isinstance(v, dict):
+                dest[k].update(v)
+        else:
+            # Flat keys like base_image, ssh_auth_sock are simply overwritten
+            dest[k] = v
+
+
 def load_sidecar_config(
     work_dir, plugin_name, debug=False, trust_flag=False, dry_run=False
 ):
@@ -449,7 +469,16 @@ def load_sidecar_config(
                                           honored if the user approves them via
                                           trust-on-first-use)
     """
-    cfg = dict(DEFAULT_CFG)
+    # Deep copy the defaults so that modifying lists/dicts during merge
+    # does not mutate the global DEFAULT_CFG.
+    cfg = {
+        "base_image": DEFAULT_CFG["base_image"],
+        "install": list(DEFAULT_CFG["install"]),
+        "mounts": list(DEFAULT_CFG["mounts"]),
+        "forward_env": list(DEFAULT_CFG["forward_env"]),
+        "set_env": dict(DEFAULT_CFG["set_env"]),
+        "ssh_auth_sock": DEFAULT_CFG["ssh_auth_sock"],
+    }
 
     # 2. Trusted layer — user-owned, all keys allowed.
     for tp in _trusted_config_paths(plugin_name):
@@ -461,7 +490,7 @@ def load_sidecar_config(
                 except ValueError as e:
                     print(f"❌ Error: Invalid trusted config in {tp}: {e}")
                     sys.exit(1)
-                cfg.update(trusted)
+                _merge_config(cfg, trusted)
                 if debug:
                     print(f"📦 Loaded trusted config: {tp}")
 
@@ -487,7 +516,7 @@ def load_sidecar_config(
 
             # Safe keys: always honored.
             safe_subset = {k: v for k, v in workspace.items() if k in SAFE_KEYS}
-            cfg.update(safe_subset)
+            _merge_config(cfg, safe_subset)
 
             # Privileged keys: honored per-item, only for items the user has
             # approved (trust-on-first-use). _resolve_privileged_trust handles
@@ -500,7 +529,7 @@ def load_sidecar_config(
                 )
                 honored = _filter_priv_subset_by_fingerprints(priv_subset, approved_fps)
                 if honored:
-                    cfg.update(honored)
+                    _merge_config(cfg, honored)
             else:
                 # No privileged keys currently requested. Drop any stored
                 # approvals for this config so that re-introducing a privileged
