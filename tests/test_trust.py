@@ -24,6 +24,12 @@ class _TrustTestBase(unittest.TestCase):
         path.write_text(json.dumps(cfg))
         return path
 
+    def write_global_config(self, cfg):
+        path = self.xdg_config / "agent-sandbox" / "opencode.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cfg))
+        return path
+
     def load(self, trust_flag=False, dry_run=False, tty=False):
         # quiet(tty=...) controls what the (redirected) stdout reports for
         # isatty(); we still patch stdin's isatty since it isn't redirected.
@@ -324,6 +330,50 @@ class TrustedConfigTests(_TrustTestBase):
         self.assertTrue(cfg["ssh_auth_sock"])
         # Workspace safe key still merges on top of trusted config.
         self.assertEqual(cfg["install"], ["ripgrep"])
+
+    def test_merged_config_privileged_key_only_in_global_config(self):
+        # Trusted key (forward_env) only in global config, not in project config
+        # -> Should NOT ask permission and expected value should be applied.
+        self.write_global_config({"forward_env": ["GLOBAL_KEY"]})
+        self.write_ws_config({"install": ["cmake"]})
+        with mock.patch("builtins.input", side_effect=AssertionError("Should not ask permission for global config")), \
+             mock.patch.object(sys.stdin, "isatty", return_value=True), quiet(tty=True):
+            cfg = self.mod.load_sidecar_config(self.ws, "opencode")
+        self.assertEqual(cfg["forward_env"], ["GLOBAL_KEY"])
+        self.assertEqual(cfg["install"], ["cmake"])
+
+    def test_merged_config_privileged_key_only_in_project_config(self):
+        # Trusted key (forward_env) only in project config
+        # -> Should ask permission. Verify expected value is applied if approved.
+        self.write_global_config({"install": ["git"]})
+        self.write_ws_config({"forward_env": ["PROJECT_KEY"]})
+        seen_prompts = []
+        def fake_input(prompt=""):
+            seen_prompts.append(prompt)
+            return "y"
+        with mock.patch("builtins.input", side_effect=fake_input), \
+             mock.patch.object(sys.stdin, "isatty", return_value=True), quiet(tty=True):
+            cfg = self.mod.load_sidecar_config(self.ws, "opencode")
+        self.assertTrue(seen_prompts, "Should have asked permission for the workspace privileged key")
+        self.assertEqual(cfg["forward_env"], ["PROJECT_KEY"])
+        self.assertEqual(cfg["install"], ["git"])
+
+    def test_merged_config_privileged_key_in_both(self):
+        # Trusted key (forward_env) in both configs
+        # -> Should ask permission (for the workspace addition).
+        # -> Approved project value should combine with/override the global value.
+        self.write_global_config({"forward_env": ["GLOBAL_KEY"]})
+        self.write_ws_config({"forward_env": ["GLOBAL_KEY", "PROJECT_KEY"]})
+        seen_prompts = []
+        def fake_input(prompt=""):
+            seen_prompts.append(prompt)
+            return "y"
+        with mock.patch("builtins.input", side_effect=fake_input), \
+             mock.patch.object(sys.stdin, "isatty", return_value=True), quiet(tty=True):
+            cfg = self.mod.load_sidecar_config(self.ws, "opencode")
+        self.assertTrue(seen_prompts, "Should have asked permission for the workspace-level key addition")
+        # Combining: GLOBAL_KEY from global, and approved PROJECT_KEY from project should both be present
+        self.assertEqual(sorted(cfg["forward_env"]), ["GLOBAL_KEY", "PROJECT_KEY"])
 
 
 if __name__ == "__main__":
