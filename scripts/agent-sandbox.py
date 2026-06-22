@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -116,7 +117,7 @@ def find_template(work_dir, plugin_name):
 #                       non-interactively they are denied unless --trust-workspace
 #                       is given.
 SAFE_KEYS = {"base_image", "install", "set_env"}
-PRIVILEGED_KEYS = {"mounts", "forward_env", "ssh_auth_sock"}
+PRIVILEGED_KEYS = {"mounts", "forward_env", "ssh_auth_sock", "ports"}
 
 DEFAULT_CFG = {
     "base_image": "opensuse/tumbleweed:latest",
@@ -125,6 +126,7 @@ DEFAULT_CFG = {
     "forward_env": [],
     "set_env": {},
     "ssh_auth_sock": False,
+    "ports": [],
 }
 
 
@@ -228,6 +230,10 @@ def _privileged_items(priv_subset):
     for env in priv_subset.get("forward_env", []):
         label = f"forward host environment variable '{env}' into the container"
         items.append((label, fp("forward_env", env)))
+
+    for p in priv_subset.get("ports", []):
+        label = f"forward container port to host '{p}'"
+        items.append((label, fp("port", p)))
 
     if priv_subset.get("ssh_auth_sock"):
         items.append(
@@ -431,6 +437,12 @@ def _filter_priv_subset_by_fingerprints(priv_subset, approved_fps):
     if envs:
         result["forward_env"] = envs
 
+    ports = [
+        p for p in priv_subset.get("ports", []) if fp("port", p) in approved_fps
+    ]
+    if ports:
+        result["ports"] = ports
+
     if priv_subset.get("ssh_auth_sock") and fp("ssh_auth_sock", True) in approved_fps:
         result["ssh_auth_sock"] = True
 
@@ -440,7 +452,7 @@ def _filter_priv_subset_by_fingerprints(priv_subset, approved_fps):
 def _merge_config(dest, src):
     """Perform a deep-ish merge of src into dest for specific config keys."""
     for k, v in src.items():
-        if k in ("install", "mounts", "forward_env"):
+        if k in ("install", "mounts", "forward_env", "ports"):
             if k not in dest or not isinstance(dest[k], list):
                 dest[k] = []
             if isinstance(v, list):
@@ -478,6 +490,7 @@ def load_sidecar_config(
         "forward_env": list(DEFAULT_CFG["forward_env"]),
         "set_env": dict(DEFAULT_CFG["set_env"]),
         "ssh_auth_sock": DEFAULT_CFG["ssh_auth_sock"],
+        "ports": list(DEFAULT_CFG["ports"]),
     }
 
     # 2. Trusted layer — user-owned, all keys allowed.
@@ -616,6 +629,20 @@ def _validate_sidecar_cfg(cfg, allow_privileged=True):
             isinstance(e, str) for e in forward_env
         ):
             raise ValueError("'forward_env' must be a list of strings.")
+
+    # ports (PRIVILEGED): list of strings (e.g. "8501:8501" or "8501")
+    if "ports" in cfg:
+        ports = cfg["ports"]
+        if not isinstance(ports, list) or not all(isinstance(p, str) for p in ports):
+            raise ValueError("'ports' must be a list of strings.")
+        for p in ports:
+            if not re.fullmatch(r"([0-9]+:)?([0-9]+)", p):
+                raise ValueError(f"Invalid port mapping format: {p!r}. Expected format: 'host_port:container_port' or 'container_port'.")
+            parts = p.split(":")
+            for part in parts:
+                port_val = int(part)
+                if port_val < 1 or port_val > 65535:
+                    raise ValueError(f"Port value {port_val} out of range (1-65535) inside mapping: {p!r}")
 
     # ssh_auth_sock (PRIVILEGED): boolean.
     if "ssh_auth_sock" in cfg:
@@ -1039,6 +1066,10 @@ def main():
     # Set static environment variables declared in sidecar
     for k, v in cfg.get("set_env", {}).items():
         podman_cmd.extend(["--env", f"{k}={v}"])
+
+    # Add port mappings from sidecar (optional, specified in sidecar)
+    for port_mapping in cfg.get("ports", []):
+        podman_cmd.extend(["-p", port_mapping])
 
     # Secure SSH Agent Forwarding (optional, specified in sidecar)
     if cfg.get("ssh_auth_sock", False):
