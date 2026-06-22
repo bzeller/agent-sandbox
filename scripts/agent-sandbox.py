@@ -82,6 +82,7 @@ def find_template(work_dir, plugin_name):
     """Hierarchical resolution of the Dockerfile template."""
     possible_paths = [
         work_dir / f".{plugin_name}-sandbox" / "Dockerfile.template",
+        XDG_CONFIG_HOME / f"{plugin_name}-sandbox" / "Dockerfile.template",
         XDG_CONFIG_HOME / "agent-sandbox" / f"{plugin_name}.template",
         XDG_CONFIG_HOME / "opencode-sandbox" / "Dockerfile.template",  # legacy fallback
         PROJECT_ROOT / "plugins" / plugin_name / "Dockerfile.template",
