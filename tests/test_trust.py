@@ -78,6 +78,21 @@ class PrivilegedItemTests(_TrustTestBase):
         self.assertIn("mounts", subset)
         self.assertIn("ssh_auth_sock", subset)
 
+    def test_ports_fingerprint_generation(self):
+        items = self.mod._privileged_items({"ports": ["8501:8501"]})
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0][0], "forward container port to host '8501:8501'")
+
+    def test_ports_validation_rejects_invalid_formats(self):
+        # Valid cases should pass silently
+        for p in ["8501:8501", "8501", "12345:6789"]:
+            self.mod._validate_sidecar_cfg({"ports": [p]})
+            
+        # Invalid cases should raise ValueError
+        for p in ["abc", "8501:abc", "abc:8501", "", "123456:789"]:
+            with self.assertRaises(ValueError):
+                self.mod._validate_sidecar_cfg({"ports": [p]})
+
 
 class TrustStoreTests(_TrustTestBase):
     def test_round_trip_and_membership(self):
