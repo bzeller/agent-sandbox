@@ -981,10 +981,23 @@ def main():
                     print(f"⚠️ Warning: Could not verify versions: {e}. Rebuilding to ensure latest version.")
                     args.rebuild = True
 
+    # Check if this is the first run for this workspace
+    init_file = ws_meta_dir / ".initialized"
+    is_first_run = not init_file.exists()
+
     if not image_check or args.rebuild:
         print(f"🔨 Building workspace image: {image_tag}")
         df_path = ws_meta_dir / "Dockerfile"
         df_path.write_text(dockerfile_content)
+        
+        # Reset first-run status on a new build or update so migrations can run/warn again
+        if init_file.exists():
+            try:
+                init_file.unlink()
+                is_first_run = True
+            except OSError:
+                pass
+
         try:
             # Use ws_meta_dir as the build context instead of CWD ('.').
             # CWD is the user's project workspace; passing it as context sends
@@ -1009,9 +1022,6 @@ def main():
         except subprocess.CalledProcessError as e:
             print(f"❌ Error: 'podman build' failed for {image_tag}")
             sys.exit(e.returncode)
-
-    # Check if this is the first run (config/ + run/ + Dockerfile)
-    is_first_run = len(list(ws_meta_dir.iterdir())) <= 3
 
     # 3. Execute Sandbox Setup
     internal_home = "/home/developer"
@@ -1129,10 +1139,12 @@ def main():
         print(
             f"🚀 Sandbox Active | Plugin: {plugin.name} | Project: {work_dir.name} ({ws_hash})"
         )
-        if is_first_run:
-            print(
-                f"💡 First run for this workspace: {plugin.name} may perform a one-time database migration. Please wait..."
-            )
+        if is_first_run and plugin.first_run_message:
+            print(plugin.first_run_message)
+            try:
+                init_file.touch(exist_ok=True)
+            except OSError:
+                pass
         if args.debug:
             print(f"DEBUG: podman_cmd={' '.join(podman_cmd)}")
         subprocess.run(podman_cmd)
