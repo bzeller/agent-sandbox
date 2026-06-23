@@ -6,6 +6,7 @@ from plugins.base import BasePlugin
 class Plugin(BasePlugin):
     name = "opencode"
     github_repo = "anomalyco/opencode"
+    first_run_message = "💡 First run for this workspace: OpenCode may perform a one-time database migration. Please wait..."
 
     host_config_subdir = "opencode-sandbox"
     host_data_subdir = "opencode-sandbox"

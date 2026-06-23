@@ -36,6 +36,7 @@ def version_tuple(v):
 class BasePlugin:
     name = ""
     github_repo = None
+    first_run_message = None
 
     host_config_subdir = ""
     host_data_subdir = ""
