@@ -50,7 +50,7 @@ A workspace directory can be a freshly cloned, untrusted repo — yet it's the v
 | Tier | Keys | How it's honored from a workspace file |
 |------|------|----------------------------------------|
 | **Safe** (affects only the disposable container) | `base_image`, `install`, `set_env` | Honored automatically |
-| **Privileged** (reaches *out* to your host) | `mounts`, `forward_env`, `ssh_auth_sock` | Honored **only after you explicitly approve them** (or from trusted config) |
+| **Privileged** (reaches *out* to your host) | `mounts`, `forward_env`, `ssh_auth_sock`, `ports` | Honored **only after you explicitly approve them** (or from trusted config) |
 
 The reasoning: a bad package or base image can only compromise the throwaway sandbox, which is already untrusted — so projects may declare these freely. But bind-mounting host paths, forwarding host environment variables (secrets!), or forwarding your SSH agent punch holes *through* the sandbox to your host.
 
@@ -116,11 +116,22 @@ Safe keys are applied automatically. Privileged keys (shown here too) trigger a 
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY"
   ],
+  "ports": [
+    "8501:8501"
+  ],
   "ssh_auth_sock": true
 }
 ```
 
 > Put privileged keys in a **workspace** file and you'll be asked to approve them on first use. Put them in **trusted config** and they apply with no prompt.
+
+### 📐 Design Note: String Lists vs. JSON Objects for Ports
+For declarative port descriptions, `agent-sandbox` uses a **list of strings** (e.g., `"ports": ["8501:8501"]`) rather than structured JSON objects (e.g. `{"host": 8501, "container": 8501}`). 
+
+The key technical benefits of this approach:
+1. **Familiarity & Conventions:** Aligns perfectly with standard Docker/Podman CLI flag formats (`-p host:container`), making it instantly readable for developers.
+2. **Implicit Port Allocation:** Natively supports Podman's single-port binding (e.g., `"ports": ["8501"]` binds container `8501` to a random, high-range host port) without needing verbose `null` key handling or complex fallback parsing in the schemas.
+3. **Lossless Deep Merging:** Allows the `_merge_config` engine to perform highly reliable, duplicate-free list concatenations. Merging lists of complex dictionaries requires nested collision and equality-comparison code, which increases codebase complexity and bugs.
 
 ### 2. Dockerfile Template Resolution (Highest to Lowest)
 If you need custom system packages or an entirely custom build for a project, you can place a custom template inside your workspace:
