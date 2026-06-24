@@ -35,16 +35,20 @@ class _TrustTestBase(unittest.TestCase):
         # isatty(); we still patch stdin's isatty since it isn't redirected.
         with mock.patch.object(sys.stdin, "isatty", return_value=tty), quiet(tty=tty):
             return self.mod.load_sidecar_config(
-                self.ws, "opencode",
-                trust_flag=trust_flag, dry_run=dry_run,
+                self.ws,
+                "opencode",
+                trust_flag=trust_flag,
+                dry_run=dry_run,
             )
 
 
 class PrivilegedItemTests(_TrustTestBase):
     def test_items_are_per_element(self):
         subset = {
-            "mounts": [{"host": "~/.a", "container": "/a"},
-                       {"host": "~/.b", "container": "/b"}],
+            "mounts": [
+                {"host": "~/.a", "container": "/a"},
+                {"host": "~/.b", "container": "/b"},
+            ],
             "forward_env": ["E1", "E2"],
             "ssh_auth_sock": True,
         }
@@ -66,7 +70,9 @@ class PrivilegedItemTests(_TrustTestBase):
 
     def test_mount_and_env_with_same_string_do_not_collide(self):
         # A mount and a forward_env both involving "x" must not share a fingerprint.
-        m = self.mod._privileged_items({"mounts": [{"host": "x", "container": "x"}]})[0][1]
+        m = self.mod._privileged_items({"mounts": [{"host": "x", "container": "x"}]})[
+            0
+        ][1]
         e = self.mod._privileged_items({"forward_env": ["x"]})[0][1]
         self.assertNotEqual(m, e)
 
@@ -87,7 +93,7 @@ class PrivilegedItemTests(_TrustTestBase):
         # Valid cases should pass silently
         for p in ["8501:8501", "8501", "12345:6789"]:
             self.mod._validate_sidecar_cfg({"ports": [p]})
-            
+
         # Invalid cases should raise ValueError
         for p in ["abc", "8501:abc", "abc:8501", "", "123456:789"]:
             with self.assertRaises(ValueError):
@@ -124,6 +130,7 @@ class TrustStoreTests(_TrustTestBase):
         self.assertEqual(store.stat().st_mode & 0o777, 0o600)
 
 
+# AI! document the code here
 class LoadSidecarTrustTests(_TrustTestBase):
     FULL_CFG = {
         "base_image": "opensuse/tumbleweed:latest",
@@ -163,15 +170,20 @@ class LoadSidecarTrustTests(_TrustTestBase):
         changed["mounts"] = [{"host": "~/.ssh", "container": "/home/developer/.ssh"}]
         self.write_ws_config(changed)
         cfg = self.load(trust_flag=False, tty=False)
-        self.assertEqual(cfg["mounts"], [], "changed config must not inherit old approval")
+        self.assertEqual(
+            cfg["mounts"], [], "changed config must not inherit old approval"
+        )
 
     def test_removing_then_readding_privilege_reprompts(self):
         # Regression: granting a privilege, removing it, then re-adding the
         # *identical* privilege must prompt again. Previously the stored
         # fingerprint still matched, so re-introduction was silently honored.
         self.write_ws_config({"install": ["x"], "ssh_auth_sock": True})
-        with mock.patch("builtins.input", return_value="y"), \
-             mock.patch.object(sys.stdin, "isatty", return_value=True), quiet(tty=True):
+        with (
+            mock.patch("builtins.input", return_value="y"),
+            mock.patch.object(sys.stdin, "isatty", return_value=True),
+            quiet(tty=True),
+        ):
             cfg = self.mod.load_sidecar_config(self.ws, "opencode")
         self.assertTrue(cfg["ssh_auth_sock"], "granted on first approval")
 
@@ -181,8 +193,11 @@ class LoadSidecarTrustTests(_TrustTestBase):
 
         # Re-add the identical privilege: must prompt again (not silently grant).
         self.write_ws_config({"install": ["x"], "ssh_auth_sock": True})
-        with mock.patch("builtins.input", side_effect=AssertionError("must re-prompt")) , \
-             mock.patch.object(sys.stdin, "isatty", return_value=True), quiet(tty=True):
+        with (
+            mock.patch("builtins.input", side_effect=AssertionError("must re-prompt")),
+            mock.patch.object(sys.stdin, "isatty", return_value=True),
+            quiet(tty=True),
+        ):
             with self.assertRaises(AssertionError):
                 self.mod.load_sidecar_config(self.ws, "opencode")
 
@@ -191,8 +206,13 @@ class LoadSidecarTrustTests(_TrustTestBase):
         # privileged config must NOT re-prompt on subsequent runs.
         self.write_ws_config({"install": ["x"], "ssh_auth_sock": True})
         self.load(trust_flag=True, tty=False)  # approve + remember
-        with mock.patch("builtins.input", side_effect=AssertionError("must not re-prompt")), \
-             mock.patch.object(sys.stdin, "isatty", return_value=True), quiet(tty=True):
+        with (
+            mock.patch(
+                "builtins.input", side_effect=AssertionError("must not re-prompt")
+            ),
+            mock.patch.object(sys.stdin, "isatty", return_value=True),
+            quiet(tty=True),
+        ):
             cfg = self.mod.load_sidecar_config(self.ws, "opencode")
         self.assertTrue(cfg["ssh_auth_sock"], "unchanged approved config stays granted")
 
@@ -205,8 +225,14 @@ class LoadSidecarTrustTests(_TrustTestBase):
         self.load(dry_run=True, tty=False)  # dry-run, privilege absent
         # Re-add and real-run: approval must still be intact (no re-prompt).
         self.write_ws_config({"ssh_auth_sock": True})
-        with mock.patch("builtins.input", side_effect=AssertionError("dry-run must not have revoked")), \
-             mock.patch.object(sys.stdin, "isatty", return_value=True), quiet(tty=True):
+        with (
+            mock.patch(
+                "builtins.input",
+                side_effect=AssertionError("dry-run must not have revoked"),
+            ),
+            mock.patch.object(sys.stdin, "isatty", return_value=True),
+            quiet(tty=True),
+        ):
             cfg = self.mod.load_sidecar_config(self.ws, "opencode")
         self.assertTrue(cfg["ssh_auth_sock"])
 
@@ -222,21 +248,31 @@ class LoadSidecarTrustTests(_TrustTestBase):
         # individually approved, so re-running must NOT prompt, and the removed
         # item must simply be absent.
         cfg = {
-            "mounts": [{"host": "~/.a", "container": "/a"},
-                       {"host": "~/.b", "container": "/b"}],
+            "mounts": [
+                {"host": "~/.a", "container": "/a"},
+                {"host": "~/.b", "container": "/b"},
+            ],
             "forward_env": ["E1", "E2"],
             "ssh_auth_sock": True,
         }
         self._approve_all(cfg)
         reduced = {
-            "mounts": [{"host": "~/.a", "container": "/a"},
-                       {"host": "~/.b", "container": "/b"}],
-            "forward_env": ["E1"],            # removed E2
+            "mounts": [
+                {"host": "~/.a", "container": "/a"},
+                {"host": "~/.b", "container": "/b"},
+            ],
+            "forward_env": ["E1"],  # removed E2
             "ssh_auth_sock": True,
         }
         self.write_ws_config(reduced)
-        with mock.patch("builtins.input", side_effect=AssertionError("must not reprompt on removal")), \
-             mock.patch.object(sys.stdin, "isatty", return_value=True), quiet(tty=True):
+        with (
+            mock.patch(
+                "builtins.input",
+                side_effect=AssertionError("must not reprompt on removal"),
+            ),
+            mock.patch.object(sys.stdin, "isatty", return_value=True),
+            quiet(tty=True),
+        ):
             result = self.mod.load_sidecar_config(self.ws, "opencode")
         self.assertEqual(result["forward_env"], ["E1"])
         self.assertEqual(len(result["mounts"]), 2)
@@ -248,11 +284,16 @@ class LoadSidecarTrustTests(_TrustTestBase):
         self._approve_all({"forward_env": ["E1", "E2"]})
         self.write_ws_config({"forward_env": ["E1", "E2", "E3"]})
         seen = {}
+
         def fake_input(prompt=""):
             seen["prompt"] = prompt
             return "y"
-        with mock.patch("builtins.input", side_effect=fake_input), \
-             mock.patch.object(sys.stdin, "isatty", return_value=True), quiet(tty=True):
+
+        with (
+            mock.patch("builtins.input", side_effect=fake_input),
+            mock.patch.object(sys.stdin, "isatty", return_value=True),
+            quiet(tty=True),
+        ):
             result = self.mod.load_sidecar_config(self.ws, "opencode")
         # All three end up honored (two pre-approved + the just-approved one).
         self.assertEqual(result["forward_env"], ["E1", "E2", "E3"])
@@ -263,19 +304,29 @@ class LoadSidecarTrustTests(_TrustTestBase):
         # approved items remain honored.
         self._approve_all({"forward_env": ["E1"]})
         self.write_ws_config({"forward_env": ["E1", "E2"]})
-        with mock.patch("builtins.input", return_value="n"), \
-             mock.patch.object(sys.stdin, "isatty", return_value=True), quiet(tty=True):
+        with (
+            mock.patch("builtins.input", return_value="n"),
+            mock.patch.object(sys.stdin, "isatty", return_value=True),
+            quiet(tty=True),
+        ):
             result = self.mod.load_sidecar_config(self.ws, "opencode")
-        self.assertEqual(result["forward_env"], ["E1"], "denied new item dropped, old kept")
+        self.assertEqual(
+            result["forward_env"], ["E1"], "denied new item dropped, old kept"
+        )
 
     def test_changing_one_item_reprompts_only_for_changed_item(self):
         # Changing a mount's host path is a NEW item (different fingerprint).
-        self._approve_all({"mounts": [{"host": "~/.a", "container": "/a"}],
-                           "forward_env": ["E1"]})
-        self.write_ws_config({"mounts": [{"host": "~/.EVIL", "container": "/a"}],
-                              "forward_env": ["E1"]})
-        with mock.patch("builtins.input", return_value="n"), \
-             mock.patch.object(sys.stdin, "isatty", return_value=True), quiet(tty=True):
+        self._approve_all(
+            {"mounts": [{"host": "~/.a", "container": "/a"}], "forward_env": ["E1"]}
+        )
+        self.write_ws_config(
+            {"mounts": [{"host": "~/.EVIL", "container": "/a"}], "forward_env": ["E1"]}
+        )
+        with (
+            mock.patch("builtins.input", return_value="n"),
+            mock.patch.object(sys.stdin, "isatty", return_value=True),
+            quiet(tty=True),
+        ):
             result = self.mod.load_sidecar_config(self.ws, "opencode")
         # Changed mount denied -> absent; unchanged forward_env still honored.
         self.assertEqual(result["mounts"], [])
@@ -287,16 +338,25 @@ class LoadSidecarTrustTests(_TrustTestBase):
         self._approve_all({"forward_env": ["E1", "E2"]})
         # Remove E2, run (prunes E2's approval); E1 still trusted.
         self.write_ws_config({"forward_env": ["E1"]})
-        with mock.patch("builtins.input", side_effect=AssertionError("E1 must stay trusted")), \
-             mock.patch.object(sys.stdin, "isatty", return_value=True), quiet(tty=True):
+        with (
+            mock.patch(
+                "builtins.input", side_effect=AssertionError("E1 must stay trusted")
+            ),
+            mock.patch.object(sys.stdin, "isatty", return_value=True),
+            quiet(tty=True),
+        ):
             self.mod.load_sidecar_config(self.ws, "opencode")
         # Re-add E2: must prompt (only for E2). Deny it; E1 remains honored.
         self.write_ws_config({"forward_env": ["E1", "E2"]})
-        with mock.patch("builtins.input", return_value="n"), \
-             mock.patch.object(sys.stdin, "isatty", return_value=True), quiet(tty=True):
+        with (
+            mock.patch("builtins.input", return_value="n"),
+            mock.patch.object(sys.stdin, "isatty", return_value=True),
+            quiet(tty=True),
+        ):
             result = self.mod.load_sidecar_config(self.ws, "opencode")
-        self.assertEqual(result["forward_env"], ["E1"], "re-added E2 denied; E1 still trusted")
-
+        self.assertEqual(
+            result["forward_env"], ["E1"], "re-added E2 denied; E1 still trusted"
+        )
 
     def test_interactive_yes_honors_and_remembers(self):
         self.write_ws_config(self.FULL_CFG)
@@ -318,7 +378,9 @@ class LoadSidecarTrustTests(_TrustTestBase):
 
     def test_dry_run_does_not_prompt_or_persist(self):
         self.write_ws_config(self.FULL_CFG)
-        with mock.patch("builtins.input", side_effect=AssertionError("must not prompt in dry-run")):
+        with mock.patch(
+            "builtins.input", side_effect=AssertionError("must not prompt in dry-run")
+        ):
             cfg = self.load(dry_run=True, tty=True)
         self.assertEqual(cfg["mounts"], [])
         self.assertFalse(self.mod._trust_store_path().exists())
@@ -334,12 +396,19 @@ class TrustedConfigTests(_TrustTestBase):
     def test_trusted_config_honors_privileged_without_prompt(self):
         trusted_dir = self.xdg_config / "agent-sandbox"
         trusted_dir.mkdir(parents=True)
-        (trusted_dir / "opencode.json").write_text(json.dumps({
-            "mounts": [{"host": "~/.gitconfig", "container": "/c"}],
-            "ssh_auth_sock": True,
-        }))
+        (trusted_dir / "opencode.json").write_text(
+            json.dumps(
+                {
+                    "mounts": [{"host": "~/.gitconfig", "container": "/c"}],
+                    "ssh_auth_sock": True,
+                }
+            )
+        )
         self.write_ws_config({"install": ["ripgrep"]})
-        with mock.patch("builtins.input", side_effect=AssertionError("trusted config must not prompt")):
+        with mock.patch(
+            "builtins.input",
+            side_effect=AssertionError("trusted config must not prompt"),
+        ):
             cfg = self.load(tty=True)
         self.assertEqual(cfg["mounts"], [{"host": "~/.gitconfig", "container": "/c"}])
         self.assertTrue(cfg["ssh_auth_sock"])
@@ -351,8 +420,16 @@ class TrustedConfigTests(_TrustTestBase):
         # -> Should NOT ask permission and expected value should be applied.
         self.write_global_config({"forward_env": ["GLOBAL_KEY"]})
         self.write_ws_config({"install": ["cmake"]})
-        with mock.patch("builtins.input", side_effect=AssertionError("Should not ask permission for global config")), \
-             mock.patch.object(sys.stdin, "isatty", return_value=True), quiet(tty=True):
+        with (
+            mock.patch(
+                "builtins.input",
+                side_effect=AssertionError(
+                    "Should not ask permission for global config"
+                ),
+            ),
+            mock.patch.object(sys.stdin, "isatty", return_value=True),
+            quiet(tty=True),
+        ):
             cfg = self.mod.load_sidecar_config(self.ws, "opencode")
         self.assertEqual(cfg["forward_env"], ["GLOBAL_KEY"])
         self.assertEqual(cfg["install"], ["cmake"])
@@ -363,13 +440,21 @@ class TrustedConfigTests(_TrustTestBase):
         self.write_global_config({"install": ["git"]})
         self.write_ws_config({"forward_env": ["PROJECT_KEY"]})
         seen_prompts = []
+
         def fake_input(prompt=""):
             seen_prompts.append(prompt)
             return "y"
-        with mock.patch("builtins.input", side_effect=fake_input), \
-             mock.patch.object(sys.stdin, "isatty", return_value=True), quiet(tty=True):
+
+        with (
+            mock.patch("builtins.input", side_effect=fake_input),
+            mock.patch.object(sys.stdin, "isatty", return_value=True),
+            quiet(tty=True),
+        ):
             cfg = self.mod.load_sidecar_config(self.ws, "opencode")
-        self.assertTrue(seen_prompts, "Should have asked permission for the workspace privileged key")
+        self.assertTrue(
+            seen_prompts,
+            "Should have asked permission for the workspace privileged key",
+        )
         self.assertEqual(cfg["forward_env"], ["PROJECT_KEY"])
         self.assertEqual(cfg["install"], ["git"])
 
@@ -380,13 +465,21 @@ class TrustedConfigTests(_TrustTestBase):
         self.write_global_config({"forward_env": ["GLOBAL_KEY"]})
         self.write_ws_config({"forward_env": ["GLOBAL_KEY", "PROJECT_KEY"]})
         seen_prompts = []
+
         def fake_input(prompt=""):
             seen_prompts.append(prompt)
             return "y"
-        with mock.patch("builtins.input", side_effect=fake_input), \
-             mock.patch.object(sys.stdin, "isatty", return_value=True), quiet(tty=True):
+
+        with (
+            mock.patch("builtins.input", side_effect=fake_input),
+            mock.patch.object(sys.stdin, "isatty", return_value=True),
+            quiet(tty=True),
+        ):
             cfg = self.mod.load_sidecar_config(self.ws, "opencode")
-        self.assertTrue(seen_prompts, "Should have asked permission for the workspace-level key addition")
+        self.assertTrue(
+            seen_prompts,
+            "Should have asked permission for the workspace-level key addition",
+        )
         # Combining: GLOBAL_KEY from global, and approved PROJECT_KEY from project should both be present
         self.assertEqual(sorted(cfg["forward_env"]), ["GLOBAL_KEY", "PROJECT_KEY"])
 
