@@ -158,19 +158,19 @@ def _workspace_config_path(work_dir, plugin_name):
 
 
 def _read_json_config(path):
-    """Read and JSON-parse a config file; return {} and warn on failure."""
+    """Read and JSON-parse a config file; raise SystemExit on failure."""
     try:
         with open(path, "r") as f:
             data = json.load(f)
         if not isinstance(data, dict):
             print(
-                f"⚠️ Warning: Ignoring config {path}: top-level value must be an object."
+                f"❌ Error: Invalid configuration {path} — top-level value must be an object."
             )
-            return {}
+            sys.exit(1)
         return data
     except Exception as e:
-        print(f"⚠️ Warning: Failed to parse config {path}: {e}")
-        return {}
+        print(f"❌ Error: Failed to parse configuration {path}: {e}")
+        sys.exit(1)
 
 
 # --- WORKSPACE TRUST STORE (TOFU, per-item) ---
