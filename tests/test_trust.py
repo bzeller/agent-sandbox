@@ -130,8 +130,20 @@ class TrustStoreTests(_TrustTestBase):
         self.assertEqual(store.stat().st_mode & 0o777, 0o600)
 
 
-# AI! document the code here
 class LoadSidecarTrustTests(_TrustTestBase):
+    """Tests for loading sidecar config with trust-on-first-use (TOFU) behavior.
+
+    These tests verify that:
+    - Safe configuration keys (install, base_image, set_env) are always honored
+    - Privileged keys (mounts, forward_env, ssh_auth_sock, ports) require approval
+    - Non-interactive runs deny privileged config unless previously approved
+    - The --trust-workspace flag grants and remembers approval
+    - Interactive prompts allow per-item approval/denial
+    - Changing privileged config revokes prior approval and re-prompts
+    - Removing then re-adding a privilege requires re-approval
+    - Per-item trust: adding/removing/changing individual items only affects those items
+    - Dry-run mode previews config without persisting trust decisions
+    """
     FULL_CFG = {
         "base_image": "opensuse/tumbleweed:latest",
         "install": ["ripgrep", "pkgconfig(libudev)"],
