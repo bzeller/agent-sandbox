@@ -636,13 +636,17 @@ def _validate_sidecar_cfg(cfg, allow_privileged=True):
         if not isinstance(ports, list) or not all(isinstance(p, str) for p in ports):
             raise ValueError("'ports' must be a list of strings.")
         for p in ports:
-            if not re.fullmatch(r"([0-9]+:)?([0-9]+)", p):
+            # Allow either "container_port" or "host_port:container_port"
+            if not re.fullmatch(r"([0-9]+:[0-9]+|[0-9]+)", p):
                 raise ValueError(f"Invalid port mapping format: {p!r}. Expected format: 'host_port:container_port' or 'container_port'.")
             parts = p.split(":")
             for part in parts:
-                port_val = int(part)
+                try:
+                    port_val = int(part)
+                except ValueError:
+                    raise ValueError(f"Port value must be numeric in mapping: {p!r}")
                 if port_val < 1 or port_val > 65535:
-                    raise ValueError(f"Port value {port_val} out of range (1-65535) inside mapping: {p!r}")
+                    raise ValueError(f"Port value {port_val} out of range (1-65535) in mapping: {p!r}")
 
     # ssh_auth_sock (PRIVILEGED): boolean.
     if "ssh_auth_sock" in cfg:
@@ -970,7 +974,12 @@ def main():
                 print(f"⚠️ Skipping update: Could not fetch latest version info for {plugin.name}.")
             else:
                 try:
-                    current_v = plugin.get_installed_version(None, image_tag)
+                    # Build a minimal podman_cmd for version checking
+                    temp_podman_cmd = [
+                        "podman", "run", "-it", "--rm",
+                        "--name", f"{plugin.container_prefix}-version-check",
+                    ]
+                    current_v = plugin.get_installed_version(temp_podman_cmd, image_tag)
                     if version_tuple(current_v) >= version_tuple(latest_v):
                         print(f"✅ {plugin.name} is already up to date (v{current_v}).")
                     else:
