@@ -43,7 +43,10 @@ class _TrustTestBase(unittest.TestCase):
 
 
 class PrivilegedItemTests(_TrustTestBase):
+    """Tests for privileged item fingerprinting and decomposition."""
+
     def test_items_are_per_element(self):
+        """Verify that each element in privileged lists becomes a distinct item."""
         subset = {
             "mounts": [
                 {"host": "~/.a", "container": "/a"},
@@ -59,17 +62,22 @@ class PrivilegedItemTests(_TrustTestBase):
         self.assertEqual(len(set(fps)), 5, "distinct items have distinct fingerprints")
 
     def test_duplicate_forward_env_collapse_to_one_fingerprint(self):
+        """Verify that duplicate elements share the same fingerprint."""
         items = self.mod._privileged_items({"forward_env": ["DUP", "DUP"]})
         fps = {fp for _, fp in items}
         self.assertEqual(len(fps), 1, "identical items share a fingerprint")
 
     def test_item_fingerprint_changes_with_value(self):
+        """Verify that different values produce different fingerprints."""
         a = self.mod._privileged_items({"forward_env": ["A"]})[0][1]
         b = self.mod._privileged_items({"forward_env": ["B"]})[0][1]
         self.assertNotEqual(a, b)
 
     def test_mount_and_env_with_same_string_do_not_collide(self):
-        # A mount and a forward_env both involving "x" must not share a fingerprint.
+        """Verify that different privilege types with the same value have distinct fingerprints.
+        
+        A mount and a forward_env both involving "x" must not share a fingerprint.
+        """
         m = self.mod._privileged_items({"mounts": [{"host": "x", "container": "x"}]})[
             0
         ][1]
@@ -77,6 +85,7 @@ class PrivilegedItemTests(_TrustTestBase):
         self.assertNotEqual(m, e)
 
     def test_privileged_subset_excludes_safe_keys(self):
+        """Verify that _privileged_subset filters out safe keys and keeps only privileged ones."""
         cfg = {"install": ["x"], "base_image": "y", "mounts": [], "ssh_auth_sock": True}
         subset = self.mod._privileged_subset(cfg)
         self.assertNotIn("install", subset)
@@ -85,12 +94,16 @@ class PrivilegedItemTests(_TrustTestBase):
         self.assertIn("ssh_auth_sock", subset)
 
     def test_ports_fingerprint_generation(self):
+        """Verify that port forwarding entries generate proper fingerprints."""
         items = self.mod._privileged_items({"ports": ["8501:8501"]})
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0][0], "forward container port to host '8501:8501'")
 
     def test_ports_validation_rejects_invalid_formats(self):
-        # Valid cases should pass silently
+        """Verify that port validation accepts valid formats and rejects invalid ones.
+        
+        Valid cases should pass silently.
+        """
         for p in ["8501:8501", "8501", "12345:6789"]:
             self.mod._validate_sidecar_cfg({"ports": [p]})
 
@@ -101,7 +114,10 @@ class PrivilegedItemTests(_TrustTestBase):
 
 
 class TrustStoreTests(_TrustTestBase):
+    """Tests for the persistent trust store operations."""
+
     def test_round_trip_and_membership(self):
+        """Verify that fingerprints can be stored and retrieved correctly."""
         path = "/some/ws/.agent-sandbox.json"
         self.assertEqual(self.mod._load_approved_fingerprints(path), set())
         self.mod._store_approved_fingerprints(path, {"fp1", "fp2"})
@@ -110,12 +126,14 @@ class TrustStoreTests(_TrustTestBase):
         self.assertNotIn("fp3", self.mod._load_approved_fingerprints(path))
 
     def test_storing_empty_set_drops_entry(self):
+        """Verify that storing an empty set removes the workspace entry from the trust store."""
         path = "/some/ws/.agent-sandbox.json"
         self.mod._store_approved_fingerprints(path, {"fp1"})
         self.mod._store_approved_fingerprints(path, set())
         self.assertEqual(self.mod._load_approved_fingerprints(path), set())
 
     def test_forget(self):
+        """Verify that forgetting workspace trust removes its entry and returns appropriate status."""
         path = "/some/ws/.agent-sandbox.json"
         self.mod._store_approved_fingerprints(path, {"fp"})
         self.assertTrue(self.mod._forget_workspace_trust(path))
@@ -124,6 +142,7 @@ class TrustStoreTests(_TrustTestBase):
         self.assertFalse(self.mod._forget_workspace_trust(path))
 
     def test_store_is_owner_only(self):
+        """Verify that the trust store file has owner-only permissions (0600)."""
         self.mod._store_approved_fingerprints("/p", {"fp"})
         store = self.mod._trust_store_path()
         self.assertTrue(store.exists())
@@ -154,12 +173,14 @@ class LoadSidecarTrustTests(_TrustTestBase):
     }
 
     def test_safe_keys_always_honored(self):
+        """Verify that safe config keys (install, set_env, base_image) are always applied without prompts."""
         self.write_ws_config(self.FULL_CFG)
         cfg = self.load(tty=False)  # non-interactive
         self.assertEqual(cfg["install"], ["ripgrep", "pkgconfig(libudev)"])
         self.assertEqual(cfg["set_env"], {"EDITOR": "vim"})
 
     def test_privileged_denied_non_interactive(self):
+        """Verify that privileged keys are denied in non-interactive mode without prior approval."""
         self.write_ws_config(self.FULL_CFG)
         cfg = self.load(tty=False)
         self.assertEqual(cfg["mounts"], [])
@@ -167,6 +188,7 @@ class LoadSidecarTrustTests(_TrustTestBase):
         self.assertFalse(cfg["ssh_auth_sock"])
 
     def test_trust_flag_honors_and_remembers(self):
+        """Verify that --trust-workspace grants and persists approval for privileged config."""
         path = self.write_ws_config(self.FULL_CFG)
         cfg = self.load(trust_flag=True, tty=False)
         self.assertEqual(cfg["mounts"], self.FULL_CFG["mounts"])
@@ -175,6 +197,7 @@ class LoadSidecarTrustTests(_TrustTestBase):
         self.assertEqual(cfg2["mounts"], self.FULL_CFG["mounts"])
 
     def test_changed_privileged_config_revokes_prior_approval(self):
+        """Verify that changing privileged config invalidates prior approval and denies access."""
         self.write_ws_config(self.FULL_CFG)
         self.load(trust_flag=True, tty=False)  # approve
         # Now change the mount target and re-run non-interactively.
@@ -187,9 +210,12 @@ class LoadSidecarTrustTests(_TrustTestBase):
         )
 
     def test_removing_then_readding_privilege_reprompts(self):
-        # Regression: granting a privilege, removing it, then re-adding the
-        # *identical* privilege must prompt again. Previously the stored
-        # fingerprint still matched, so re-introduction was silently honored.
+        """Verify that removing and re-adding an identical privilege requires re-approval.
+        
+        Regression: granting a privilege, removing it, then re-adding the
+        *identical* privilege must prompt again. Previously the stored
+        fingerprint still matched, so re-introduction was silently honored.
+        """
         self.write_ws_config({"install": ["x"], "ssh_auth_sock": True})
         with (
             mock.patch("builtins.input", return_value="y"),
@@ -214,8 +240,11 @@ class LoadSidecarTrustTests(_TrustTestBase):
                 self.mod.load_sidecar_config(self.ws, "opencode")
 
     def test_unchanged_privilege_is_not_reprompted(self):
-        # Counterpart to the regression test: an unchanged, still-present
-        # privileged config must NOT re-prompt on subsequent runs.
+        """Verify that unchanged privileged config doesn't re-prompt on subsequent runs.
+        
+        Counterpart to the regression test: an unchanged, still-present
+        privileged config must NOT re-prompt on subsequent runs.
+        """
         self.write_ws_config({"install": ["x"], "ssh_auth_sock": True})
         self.load(trust_flag=True, tty=False)  # approve + remember
         with (
@@ -229,8 +258,11 @@ class LoadSidecarTrustTests(_TrustTestBase):
         self.assertTrue(cfg["ssh_auth_sock"], "unchanged approved config stays granted")
 
     def test_dry_run_with_privilege_removed_does_not_forget(self):
-        # A dry-run must be side-effect-free: removing the privilege under
-        # --dry-run must NOT revoke a stored approval.
+        """Verify that dry-run mode doesn't revoke stored approvals.
+        
+        A dry-run must be side-effect-free: removing the privilege under
+        --dry-run must NOT revoke a stored approval.
+        """
         self.write_ws_config({"ssh_auth_sock": True})
         self.load(trust_flag=True, tty=False)  # approve
         self.write_ws_config({"install": ["x"]})
@@ -248,17 +280,17 @@ class LoadSidecarTrustTests(_TrustTestBase):
             cfg = self.mod.load_sidecar_config(self.ws, "opencode")
         self.assertTrue(cfg["ssh_auth_sock"])
 
-    # --- Per-item trust behavior (multiple items of the same kind) ---
-
     def _approve_all(self, cfg):
         """Write cfg and approve everything via --trust-workspace (non-interactive)."""
         self.write_ws_config(cfg)
         self.load(trust_flag=True, tty=False)
 
     def test_removing_one_of_many_does_not_reprompt(self):
-        # Your scenario: trust 5 items, remove one. The remaining four were each
-        # individually approved, so re-running must NOT prompt, and the removed
-        # item must simply be absent.
+        """Verify that removing one approved item doesn't re-prompt for the remaining items.
+        
+        Trust 5 items, remove one. The remaining four were each individually approved,
+        so re-running must NOT prompt, and the removed item must simply be absent.
+        """
         cfg = {
             "mounts": [
                 {"host": "~/.a", "container": "/a"},
@@ -291,8 +323,11 @@ class LoadSidecarTrustTests(_TrustTestBase):
         self.assertTrue(result["ssh_auth_sock"])
 
     def test_adding_one_item_prompts_only_for_that_item(self):
-        # Trust 2 env vars, then add a third. Only the new one needs approval;
-        # the previously-approved ones must still be honored.
+        """Verify that adding a new item prompts only for that item, not previously-approved ones.
+        
+        Trust 2 env vars, then add a third. Only the new one needs approval;
+        the previously-approved ones must still be honored.
+        """
         self._approve_all({"forward_env": ["E1", "E2"]})
         self.write_ws_config({"forward_env": ["E1", "E2", "E3"]})
         seen = {}
@@ -312,8 +347,11 @@ class LoadSidecarTrustTests(_TrustTestBase):
         self.assertIn("prompt", seen, "a prompt must have been shown for the new item")
 
     def test_adding_item_denied_keeps_previously_approved(self):
-        # Add a new item but DENY it: the new item is dropped, the previously
-        # approved items remain honored.
+        """Verify that denying a new item keeps previously-approved items honored.
+        
+        Add a new item but DENY it: the new item is dropped, the previously
+        approved items remain honored.
+        """
         self._approve_all({"forward_env": ["E1"]})
         self.write_ws_config({"forward_env": ["E1", "E2"]})
         with (
@@ -327,7 +365,10 @@ class LoadSidecarTrustTests(_TrustTestBase):
         )
 
     def test_changing_one_item_reprompts_only_for_changed_item(self):
-        # Changing a mount's host path is a NEW item (different fingerprint).
+        """Verify that changing one item re-prompts only for that item, not unchanged ones.
+        
+        Changing a mount's host path is a NEW item (different fingerprint).
+        """
         self._approve_all(
             {"mounts": [{"host": "~/.a", "container": "/a"}], "forward_env": ["E1"]}
         )
@@ -345,8 +386,11 @@ class LoadSidecarTrustTests(_TrustTestBase):
         self.assertEqual(result["forward_env"], ["E1"])
 
     def test_removing_item_then_readding_reprompts_only_for_it(self):
-        # Per-item version of the re-introduction bug: remove one item, re-add
-        # it; only that item re-prompts, the others stay silently trusted.
+        """Verify that re-adding a removed item re-prompts only for that item.
+        
+        Per-item version of the re-introduction bug: remove one item, re-add
+        it; only that item re-prompts, the others stay silently trusted.
+        """
         self._approve_all({"forward_env": ["E1", "E2"]})
         # Remove E2, run (prunes E2's approval); E1 still trusted.
         self.write_ws_config({"forward_env": ["E1"]})
@@ -371,24 +415,28 @@ class LoadSidecarTrustTests(_TrustTestBase):
         )
 
     def test_interactive_yes_honors_and_remembers(self):
+        """Verify that answering 'yes' in interactive mode honors and persists approval."""
         self.write_ws_config(self.FULL_CFG)
         with mock.patch("builtins.input", return_value="y"):
             cfg = self.load(tty=True)
         self.assertEqual(cfg["mounts"], self.FULL_CFG["mounts"])
 
     def test_interactive_no_denies(self):
+        """Verify that answering 'no' in interactive mode denies privileged config."""
         self.write_ws_config(self.FULL_CFG)
         with mock.patch("builtins.input", return_value="n"):
             cfg = self.load(tty=True)
         self.assertEqual(cfg["mounts"], [])
 
     def test_interactive_eof_denies(self):
+        """Verify that EOF (Ctrl-D) in interactive mode denies privileged config."""
         self.write_ws_config(self.FULL_CFG)
         with mock.patch("builtins.input", side_effect=EOFError):
             cfg = self.load(tty=True)
         self.assertEqual(cfg["mounts"], [])
 
     def test_dry_run_does_not_prompt_or_persist(self):
+        """Verify that dry-run mode doesn't prompt or persist any trust decisions."""
         self.write_ws_config(self.FULL_CFG)
         with mock.patch(
             "builtins.input", side_effect=AssertionError("must not prompt in dry-run")
@@ -398,6 +446,7 @@ class LoadSidecarTrustTests(_TrustTestBase):
         self.assertFalse(self.mod._trust_store_path().exists())
 
     def test_dry_run_with_trust_flag_honors_for_preview_but_does_not_persist(self):
+        """Verify that dry-run with --trust-workspace previews config but doesn't persist approval."""
         self.write_ws_config(self.FULL_CFG)
         cfg = self.load(trust_flag=True, dry_run=True, tty=True)
         self.assertEqual(cfg["mounts"], self.FULL_CFG["mounts"])
@@ -405,7 +454,10 @@ class LoadSidecarTrustTests(_TrustTestBase):
 
 
 class TrustedConfigTests(_TrustTestBase):
+    """Tests for trusted (global) config behavior and merging with workspace config."""
+
     def test_trusted_config_honors_privileged_without_prompt(self):
+        """Verify that privileged keys in trusted global config are honored without prompts."""
         trusted_dir = self.xdg_config / "agent-sandbox"
         trusted_dir.mkdir(parents=True)
         (trusted_dir / "opencode.json").write_text(
@@ -428,8 +480,11 @@ class TrustedConfigTests(_TrustTestBase):
         self.assertEqual(cfg["install"], ["ripgrep"])
 
     def test_merged_config_privileged_key_only_in_global_config(self):
-        # Trusted key (forward_env) only in global config, not in project config
-        # -> Should NOT ask permission and expected value should be applied.
+        """Verify that privileged keys only in global config don't require approval.
+        
+        Trusted key (forward_env) only in global config, not in project config
+        -> Should NOT ask permission and expected value should be applied.
+        """
         self.write_global_config({"forward_env": ["GLOBAL_KEY"]})
         self.write_ws_config({"install": ["cmake"]})
         with (
@@ -447,8 +502,11 @@ class TrustedConfigTests(_TrustTestBase):
         self.assertEqual(cfg["install"], ["cmake"])
 
     def test_merged_config_privileged_key_only_in_project_config(self):
-        # Trusted key (forward_env) only in project config
-        # -> Should ask permission. Verify expected value is applied if approved.
+        """Verify that privileged keys only in workspace config require approval.
+        
+        Trusted key (forward_env) only in project config
+        -> Should ask permission. Verify expected value is applied if approved.
+        """
         self.write_global_config({"install": ["git"]})
         self.write_ws_config({"forward_env": ["PROJECT_KEY"]})
         seen_prompts = []
@@ -471,9 +529,12 @@ class TrustedConfigTests(_TrustTestBase):
         self.assertEqual(cfg["install"], ["git"])
 
     def test_merged_config_privileged_key_in_both(self):
-        # Trusted key (forward_env) in both configs
-        # -> Should ask permission (for the workspace addition).
-        # -> Approved project value should combine with/override the global value.
+        """Verify that workspace additions to global privileged keys require approval.
+        
+        Trusted key (forward_env) in both configs
+        -> Should ask permission (for the workspace addition).
+        -> Approved project value should combine with/override the global value.
+        """
         self.write_global_config({"forward_env": ["GLOBAL_KEY"]})
         self.write_ws_config({"forward_env": ["GLOBAL_KEY", "PROJECT_KEY"]})
         seen_prompts = []
