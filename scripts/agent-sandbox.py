@@ -1061,6 +1061,11 @@ def main():
     for m in cfg.get("mounts", []):
         try:
             host_p = Path(m["host"]).expanduser().resolve()
+            if not host_p.exists():
+                raise ValueError(
+                    f"Host path {m['host']!r} (resolved to {host_p}) does not exist. "
+                    "Please verify the path or fix any typos in your config."
+                )
             cont_p = _validate_container_path(m["container"], source="sidecar")
             _warn_if_sensitive_host_mount(host_p, source="sidecar config")
             podman_cmd.extend(["-v", f"{host_p}:{cont_p}:Z"])
