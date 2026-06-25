@@ -1,0 +1,43 @@
+FROM {base_image}
+
+# Install core system tools and resolve busybox conflicts
+RUN zypper --non-interactive refresh && \
+    zypper --non-interactive install -y gawk diffutils gettext-tools && \
+    zypper --non-interactive install -y \
+    sudo shadow which curl dbus-1 dbus-1-daemon git-core
+
+# Create a developer user (UID 1000) for rootless mapping
+# Passwordless sudo is scoped to zypper only and is removed after package installation
+RUN groupadd -g 1000 developer && \
+    useradd -m -u 1000 -g developer -s /bin/bash developer && \
+    echo "developer ALL=(ALL) NOPASSWD: /usr/bin/zypper" >> /etc/sudoers
+
+# Pre-create internal volume paths to avoid root ownership issues
+RUN mkdir -p /home/developer/.claude \
+             /home/developer/.local/share/claude \
+             /workspace && \
+    chown -R developer:developer /home/developer /workspace
+
+USER developer
+WORKDIR /workspace
+
+ENV PATH="/home/developer/.local/bin:${{PATH}}"
+
+# Workspace-specific packages
+RUN if [ -n "{extra_packages}" ]; then sudo zypper --non-interactive install -y {extra_packages}; fi
+
+# Cache-breaker for pluggable tool installation (rebuilds only from here down on update)
+ARG TOOL_VERSION=latest
+
+# Install Claude Code using the official script (which places it in ~/.local/bin/claude)
+RUN curl --proto '=https' --tlsv1.2 -fsSL https://claude.ai/install.sh | sh
+
+# Remove the zypper-only sudo rule now that all package installation is done.
+USER root
+RUN sed -i '/developer.*zypper/d' /etc/sudoers
+USER developer
+
+ENV LANG=en_US.UTF-8
+ENV TERM=xterm-256color
+
+CMD ["/bin/bash", "--login"]

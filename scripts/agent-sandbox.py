@@ -1034,25 +1034,38 @@ def main():
 
     # 3. Execute Sandbox Setup
     internal_home = "/home/developer"
+    container_name = f"{plugin.container_prefix}-{ws_hash}-{int(datetime.now().timestamp())}"
+    
+    # We always set XDG_RUNTIME_DIR to an isolated, user-owned directory (~/.run)
+    # inside the container, backed by the host's ws_run_dir. This is a critical
+    # system requirement: dbus-run-session (used by all plugins to prevent
+    # multi-session collisions) will crash on startup with permission errors
+    # if XDG_RUNTIME_DIR is missing or points to a root-owned directory like /tmp or /run.
     podman_cmd = [
         "podman",
         "run",
         "-it",
         "--rm",
         "--name",
-        f"{plugin.container_prefix}-{ws_hash}-{int(datetime.now().timestamp())}",
+        container_name,
         "--userns=keep-id",
         "--env",
-        f"XDG_RUNTIME_DIR={plugin.internal_data_dir}/run",
+        "XDG_RUNTIME_DIR=/home/developer/.run",
         "--workdir",
         "/workspace",
         "-v",
         f"{work_dir}:/workspace:Z",
         "-v",
-        f"{ws_config_dir}:{plugin.internal_config_dir}:Z",
-        "-v",
-        f"{ws_meta_dir}:{plugin.internal_data_dir}:Z",
+        f"{ws_run_dir}:/home/developer/.run:Z",
     ]
+
+    # Dynamically mount isolated config and data directories only if defined by the plugin.
+    # This prevents masking standard tool-compiled program directories inside the container
+    # (such as Claude's compiled binary assets in ~/.local/share/claude).
+    if plugin.internal_config_dir:
+        podman_cmd.extend(["-v", f"{ws_config_dir}:{plugin.internal_config_dir}:Z"])
+    if plugin.internal_data_dir:
+        podman_cmd.extend(["-v", f"{ws_meta_dir}:{plugin.internal_data_dir}:Z"])
 
     # Let the plugin append its own configuration mounts
     plugin.mount_config(podman_cmd, ws_meta_dir, xdg_config, internal_home)
