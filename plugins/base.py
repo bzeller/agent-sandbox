@@ -14,7 +14,7 @@ def version_tuple(v):
     or entirely non-numeric version returns (0,) so any real version compares
     greater.
     """
-    if not v or not isinstance(v, str):
+    if not isinstance(v, str) or not v:
         return (0,)
     s = v.strip()
     # Strip a single leading version marker.
@@ -54,7 +54,8 @@ class BasePlugin:
         if not self.github_repo:
             return None
         # Validate github_repo is in the form "owner/repo" before building URL
-        if not re.fullmatch(r"[a-zA-Z0-9_.\-]+/[a-zA-Z0-9_.\-]+", self.github_repo):
+        # Stricter validation: no dots to prevent path traversal attempts
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+", self.github_repo):
             print(f"⚠️ Warning: Plugin '{self.name}' has an invalid github_repo value: {self.github_repo!r}")
             return None
         url = f"https://api.github.com/repos/{self.github_repo}/releases/latest"
