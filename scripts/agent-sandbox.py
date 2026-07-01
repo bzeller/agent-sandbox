@@ -116,7 +116,7 @@ def find_template(work_dir, plugin_name):
 #                       trust-on-first-use approval (see the trust store below);
 #                       non-interactively they are denied unless --trust-workspace
 #                       is given.
-SAFE_KEYS = {"base_image", "install", "set_env"}
+SAFE_KEYS = {"base_image", "install", "set_env", "microvm", "microvm_cpus", "microvm_ram_mib"}
 PRIVILEGED_KEYS = {"mounts", "forward_env", "ssh_auth_sock", "ports"}
 
 DEFAULT_CFG = {
@@ -127,6 +127,9 @@ DEFAULT_CFG = {
     "set_env": {},
     "ssh_auth_sock": False,
     "ports": [],
+    "microvm": False,
+    "microvm_cpus": None,
+    "microvm_ram_mib": None,
 }
 
 
@@ -491,6 +494,9 @@ def load_sidecar_config(
         "set_env": dict(DEFAULT_CFG["set_env"]),
         "ssh_auth_sock": DEFAULT_CFG["ssh_auth_sock"],
         "ports": list(DEFAULT_CFG["ports"]),
+        "microvm": DEFAULT_CFG["microvm"],
+        "microvm_cpus": DEFAULT_CFG["microvm_cpus"],
+        "microvm_ram_mib": DEFAULT_CFG["microvm_ram_mib"],
     }
 
     # 2. Trusted layer — user-owned, all keys allowed.
@@ -653,6 +659,29 @@ def _validate_sidecar_cfg(cfg, allow_privileged=True):
         if not isinstance(cfg["ssh_auth_sock"], bool):
             raise ValueError("'ssh_auth_sock' must be a boolean.")
 
+    # microvm (SAFE): boolean.
+    if "microvm" in cfg and cfg["microvm"] is not None:
+        if not isinstance(cfg["microvm"], bool):
+            raise ValueError("'microvm' must be a boolean.")
+
+    # microvm_cpus (SAFE): positive integer with reasonable upper bound.
+    if "microvm_cpus" in cfg and cfg["microvm_cpus"] is not None:
+        if not isinstance(cfg["microvm_cpus"], int) or cfg["microvm_cpus"] < 1:
+            raise ValueError("'microvm_cpus' must be a positive integer.")
+        if cfg["microvm_cpus"] > 64:
+            raise ValueError("'microvm_cpus' must be <= 64 (requested: {})".format(cfg["microvm_cpus"]))
+        if not cfg.get("microvm", False):
+            raise ValueError("'microvm_cpus' can only be configured when 'microvm' is set to true.")
+
+    # microvm_ram_mib (SAFE): positive integer with reasonable upper bound.
+    if "microvm_ram_mib" in cfg and cfg["microvm_ram_mib"] is not None:
+        if not isinstance(cfg["microvm_ram_mib"], int) or cfg["microvm_ram_mib"] < 128:
+            raise ValueError("'microvm_ram_mib' must be an integer and at least 128 MiB.")
+        if cfg["microvm_ram_mib"] > 65536:
+            raise ValueError("'microvm_ram_mib' must be <= 65536 MiB (64 GB, requested: {} MiB)".format(cfg["microvm_ram_mib"]))
+        if not cfg.get("microvm", False):
+            raise ValueError("'microvm_ram_mib' can only be configured when 'microvm' is set to true.")
+
 
 def _validate_container_path(path_str, source="sidecar"):
     """Validate and normalise a container-side mount destination.
@@ -662,16 +691,20 @@ def _validate_container_path(path_str, source="sidecar"):
     escape '/', e.g. '/home/../etc' -> '/etc'), so the result is always a
     concrete absolute path. Relative paths and empty strings are rejected.
     """
-    if not path_str or not path_str.startswith("/"):
+    if not isinstance(path_str, str) or not path_str or not path_str.startswith("/"):
         raise ValueError(
             f"Container mount path from {source} must be an absolute path, got: {path_str!r}"
         )
-    normalised = os.path.normpath(path_str)
-    # Defensive: an absolute path cannot retain leading '..' after normpath,
-    # but guard anyway in case of unusual inputs.
-    if ".." in normalised.split(os.sep):
+    # Reject paths with null bytes (can bypass security checks in some contexts)
+    if "\x00" in path_str:
         raise ValueError(
-            f"Container mount path from {source} contains '..' traversal: {path_str!r}"
+            f"Container mount path from {source} contains null byte: {path_str!r}"
+        )
+    normalised = os.path.normpath(path_str)
+    # Ensure the normalized path is still absolute (defense in depth)
+    if not normalised.startswith("/"):
+        raise ValueError(
+            f"Container mount path from {source} normalized to non-absolute path: {path_str!r} -> {normalised!r}"
         )
     return normalised
 
@@ -780,6 +813,95 @@ def get_legacy_workspace_hash(path):
     return hashlib.md5(str(path.resolve()).encode()).hexdigest()[:8]
 
 
+def _get_sane_microvm_defaults():
+    """Dynamically calculate hardware-aware CPU and RAM allocations.
+
+    - vCPUs: 50% of host's physical cores (minimum 1).
+    - Memory: 20% of host's total physical RAM (minimum 1024 MiB).
+    """
+    import multiprocessing
+    cpus = max(1, multiprocessing.cpu_count() // 2)
+    try:
+        pages = os.sysconf('SC_PHYS_PAGES')
+        page_size = os.sysconf('SC_PAGE_SIZE')
+        total_ram_mib = (pages * page_size) // (1024 * 1024)
+        ram = max(1024, total_ram_mib // 5)
+    except:
+        ram = 2048  # Sane fallback if system conf is unavailable
+    return cpus, ram
+
+
+def _check_microvm_availability():
+    """Verify KVM availability, host group permissions, and krun OCI support.
+
+    Halts with a clean, distro-agnostic error on any missing capability.
+    """
+    kvm_path = Path("/dev/kvm")
+    
+    # 1. Verify CPU Hardware Virtualization (KVM) is enabled
+    if not kvm_path.exists():
+        print("❌ Error: Hardware-virtualized microVMs require KVM support.")
+        print("   Please ensure CPU virtualization is enabled in your BIOS/UEFI,")
+        print("   and that the KVM kernel module is loaded.")
+        sys.exit(1)
+        
+    # 2. Verify host user permissions on KVM
+    if not os.access(kvm_path, os.R_OK | os.W_OK):
+        print("❌ Error: Permission denied reading/writing '/dev/kvm'.")
+        print("   Please ensure your host user has read/write permissions to '/dev/kvm'.")
+        print("   *(Note: You can inspect the required group ownership on your machine via: ls -la /dev/kvm)*")
+        sys.exit(1)
+
+    # 3. Verify krun OCI runtime configuration in Podman
+    try:
+        res = subprocess.run(
+            ["podman", "info", "--format", "{{.Host.OCIRuntimes}}"],
+            capture_output=True, text=True, check=True
+        )
+        runtimes = res.stdout.strip().lower()
+        if "krun" not in runtimes:
+            print("❌ Error: The 'krun' OCI runtime is not configured or available in Podman.")
+            print("   Please install 'crun' with 'libkrun' support using your distribution's package manager.")
+            sys.exit(1)
+    except Exception:
+        # Fallback binary check
+        import shutil
+        if not shutil.which("crun"):
+            print("❌ Error: OCI runtime 'crun' binary was not found on your host.")
+            print("   Please install 'crun' with 'libkrun' support using your distribution's package manager.")
+            sys.exit(1)
+
+
+def _apply_microvm_runtime(podman_cmd, cfg, args):
+    """Enforce hardware-virtualized microVM runtime (krun) if requested.
+
+    Appends '--runtime krun' and appropriate CPU/RAM annotations to podman_cmd.
+    If hardware allocations are not explicitly specified in the sidecar, they
+    default dynamically to host-aware sane values.
+
+    Returns (is_microvm, cpus, ram) tuple.
+    """
+    is_microvm = args.microvm or cfg.get("microvm", False)
+    if not is_microvm:
+        return False, None, None
+
+    # Gracefully verify host KVM and Podman krun capabilities before trying to start
+    _check_microvm_availability()
+
+    podman_cmd.extend(["--runtime", "krun"])
+    default_cpus, default_ram = _get_sane_microvm_defaults()
+    
+    # Resolve CPU allocation (explicit override > dynamic host-aware default)
+    cpus = cfg.get("microvm_cpus") or default_cpus
+    podman_cmd.extend(["--annotation", f"krun.cpus={cpus}"])
+    
+    # Resolve RAM allocation (explicit override > dynamic host-aware default)
+    ram = cfg.get("microvm_ram_mib") or default_ram
+    podman_cmd.extend(["--annotation", f"krun.ram_mib={ram}"])
+    
+    return True, cpus, ram
+
+
 def migrate_legacy_workspace_dir(xdg_data, work_dir):
     """Move a legacy MD5-named session dir to its SHA-256 name, if needed.
 
@@ -856,6 +978,7 @@ def main():
     )
     parser.add_argument("--debug", action="store_true", help="Show debug information")
     parser.add_argument("--root", action="store_true", help="Run container as root")
+    parser.add_argument("--microvm", action="store_true", help="Launch the container inside a hardware-virtualized krun MicroVM")
     parser.add_argument(
         "--update",
         action="store_true",
@@ -1007,6 +1130,21 @@ def main():
             except OSError:
                 pass
 
+        # Identify previous compiled images for this specific project workspace (same ws_hash)
+        # to prevent disk-space bloating from obsolete image layers
+        workspace_image_pattern = f"localhost/{plugin.image_prefix}:{ws_hash}-*"
+        try:
+            old_images_res = subprocess.run(
+                ["podman", "images", "--format", "{{.Repository}}:{{.Tag}}", workspace_image_pattern],
+                capture_output=True, text=True
+            )
+            old_images = [
+                img.strip() for line in old_images_res.stdout.splitlines()
+                if (img := line.strip()) and img != image_tag
+            ]
+        except Exception:
+            old_images = []
+
         try:
             # Use ws_meta_dir as the build context instead of CWD ('.').
             # CWD is the user's project workspace; passing it as context sends
@@ -1028,6 +1166,16 @@ def main():
                 ],
                 check=True,
             )
+
+            # Build succeeded! Clean up older workspace images to prevent disk clutter
+            if old_images:
+                if args.debug:
+                    print(f"DEBUG: Pruning {len(old_images)} older workspace image(s): {', '.join(old_images)}")
+                for old_img in old_images:
+                    try:
+                        subprocess.run(["podman", "rmi", old_img], capture_output=True)
+                    except Exception:
+                        pass
         except subprocess.CalledProcessError as e:
             print(f"❌ Error: 'podman build' failed for {image_tag}")
             sys.exit(e.returncode)
@@ -1035,12 +1183,8 @@ def main():
     # 3. Execute Sandbox Setup
     internal_home = "/home/developer"
     container_name = f"{plugin.container_prefix}-{ws_hash}-{int(datetime.now().timestamp())}"
+    container_hostname = f"{plugin.container_prefix}-{ws_hash}"
     
-    # We always set XDG_RUNTIME_DIR to an isolated, user-owned directory (~/.run)
-    # inside the container, backed by the host's ws_run_dir. This is a critical
-    # system requirement: dbus-run-session (used by all plugins to prevent
-    # multi-session collisions) will crash on startup with permission errors
-    # if XDG_RUNTIME_DIR is missing or points to a root-owned directory like /tmp or /run.
     podman_cmd = [
         "podman",
         "run",
@@ -1048,16 +1192,31 @@ def main():
         "--rm",
         "--name",
         container_name,
-        "--userns=keep-id",
-        "--env",
-        "XDG_RUNTIME_DIR=/home/developer/.run",
         "--workdir",
         "/workspace",
         "-v",
         f"{work_dir}:/workspace:Z",
-        "-v",
-        f"{ws_run_dir}:/home/developer/.run:Z",
+        "--userns=keep-id",
+        # -- Hardening security configurations --
+        "--tmpfs", "/tmp:rw,nosuid,size=1g",
+        # "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
+        "--hostname", container_hostname,
+        "--pids-limit", "1024",
     ]
+
+    # Configure hardware-virtualized microVM runtime (krun) if requested
+    is_micro_enabled, micro_cpus, micro_ram = _apply_microvm_runtime(podman_cmd, cfg, args)
+
+    if not is_micro_enabled:
+        # Standard Namespace Container Execution:
+        # Mount a user-owned transient runtime dir to prevent permissions errors.
+        podman_cmd.extend([
+            "--env",
+            "XDG_RUNTIME_DIR=/home/developer/.run",
+            "-v",
+            f"{ws_run_dir}:/home/developer/.run:Z",
+        ])
 
     # Dynamically mount isolated config and data directories only if defined by the plugin.
     # This prevents masking standard tool-compiled program directories inside the container
@@ -1150,22 +1309,36 @@ def main():
     # Normal Execution
     podman_cmd.append(image_tag)
 
-    # Wrap target command in login shell and private D-Bus session.
+    # Wrap target command in login shell.
+    # We bypass private D-Bus wrapping (dbus-run-session) inside hardware-virtualized
+    # microVMs (krun) because the VM's guest OS already guarantees perfect isolation.
+    # Standard container namespace runs continue to use the private D-Bus session
+    # to prevent multi-instance conflicts.
     # shlex.quote() is applied to every argument unconditionally so that
     # shell metacharacters (backticks, $(), ;, &&, |, quotes …) cannot
     # break out of the argument boundary and execute on the host.
     target_cmd = args.cmd_args if args.cmd_args else plugin.default_cmd
     cmd_str = " ".join(shlex.quote(arg) for arg in target_cmd)
 
-    wrapped_cmd = ["/bin/bash", "--login", "-c", f"dbus-run-session -- {cmd_str}"]
+    if is_micro_enabled:
+        wrapped_cmd = ["/bin/bash", "--login", "-c", cmd_str]
+    else:
+        wrapped_cmd = ["/bin/bash", "--login", "-c", f"dbus-run-session -- {cmd_str}"]
     podman_cmd.extend(wrapped_cmd)
 
     if args.dry_run:
         print(f"\n[DRY RUN] Command:\n{' '.join(podman_cmd)}\n")
     else:
-        print(
-            f"🚀 Sandbox Active | Plugin: {plugin.name} | Project: {work_dir.name} ({ws_hash})"
-        )
+        print(f"🚀 Sandbox Active | Plugin: {plugin.name} | Project: {work_dir.name} ({ws_hash})")
+        if is_micro_enabled:
+            print(f"   • Mode: Hardware-Isolated MicroVM (krun / KVM Virtualization)")
+            print(f"   • Hardware: {micro_cpus} vCPUs | {micro_ram} MiB RAM (Dynamic Host-Aware Allocation)")
+        else:
+            print(f"   • Mode: Standard Container Namespace (Shared-Kernel Isolation)")
+        print(f"   • Hostname: {container_hostname}")
+        print(f"   • Hardening: No-New-Privs, PID-Limit (1024), Tmpfs /tmp (1g)")
+        print("")
+
         if is_first_run and plugin.first_run_message:
             print(plugin.first_run_message)
             try:

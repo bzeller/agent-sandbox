@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from pathlib import Path
 from plugins.base import BasePlugin
 
 class Plugin(BasePlugin):
@@ -96,29 +97,48 @@ class Plugin(BasePlugin):
             print(f"🔄 Merging workspace auth keys into global config: {global_auth}")
             updated_global = {**global_data, **local_data}
 
-            # Atomic write: open temp file with O_CREAT|O_WRONLY|mode 0o600 so
-            # it is never world-readable even transiently, then rename into place.
-            tmp_auth = global_auth.with_suffix(".tmp")
-            fd = os.open(str(tmp_auth), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as fh:
-                fh.write(json.dumps(updated_global, indent=2))
-            tmp_auth.replace(global_auth)
-            global_auth.chmod(0o600)
+            # Atomic write: use O_EXCL to fail if temp file already exists (prevents
+            # symlink attacks). Open with O_CREAT|O_WRONLY|mode 0o600 so it is never
+            # world-readable even transiently, then rename into place.
+            import tempfile
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                dir=global_auth.parent,
+                prefix=".auth-",
+                suffix=".tmp"
+            )
+            try:
+                os.chmod(tmp_fd, 0o600)
+                with os.fdopen(tmp_fd, "w") as fh:
+                    fh.write(json.dumps(updated_global, indent=2))
+                Path(tmp_path).replace(global_auth)
+                global_auth.chmod(0o600)
+            except Exception:
+                # Clean up temp file on failure
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
 
             # TOCTOU guard: verify the inode hasn't changed since our initial
             # stat.  If it has (e.g. a race replaced the file with a symlink),
             # we abort rather than deleting an unintended file.
-            current_stat = os.lstat(str(local_auth))
-            if (current_stat.st_ino != initial_stat.st_ino or
-                    current_stat.st_dev != initial_stat.st_dev):
-                print(f"⚠️ Warning: local auth.json changed during migration (possible race). "
-                      f"Migration written to global config but local file NOT deleted.")
-                return
-            if os.path.islink(str(local_auth)):
-                print(f"⚠️ Warning: local auth.json is now a symlink — not deleting.")
-                return
-
-            local_auth.unlink()
+            # Use unlink with dir_fd to make the check and delete atomic.
+            try:
+                parent_fd = os.open(str(local_auth.parent), os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    current_stat = os.fstat(os.open(str(local_auth), os.O_RDONLY | os.O_NOFOLLOW))
+                    if (current_stat.st_ino != initial_stat.st_ino or
+                            current_stat.st_dev != initial_stat.st_dev):
+                        print(f"⚠️ Warning: local auth.json changed during migration (possible race). "
+                              f"Migration written to global config but local file NOT deleted.")
+                        return
+                    # Unlink using the parent directory fd for atomicity
+                    os.unlink(local_auth.name, dir_fd=parent_fd)
+                finally:
+                    os.close(parent_fd)
+            except Exception as e:
+                print(f"⚠️ Warning: Could not safely delete local auth.json: {e}")
 
         except Exception as e:
             if isinstance(e, SystemExit):

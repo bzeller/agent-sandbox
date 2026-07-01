@@ -49,6 +49,26 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.mod._validate_sidecar_cfg({"mounts": [{"host": "~/x"}]}, allow_privileged=True)
 
+    def test_microvm_cpu_and_ram_require_microvm_enabled(self):
+        # Setting CPUs or RAM while microvm is false must raise ValueError
+        with self.assertRaises(ValueError):
+            self.mod._validate_sidecar_cfg({"microvm_cpus": 4}, allow_privileged=True)
+        with self.assertRaises(ValueError):
+            self.mod._validate_sidecar_cfg({"microvm_ram_mib": 512, "microvm": False}, allow_privileged=True)
+
+    def test_microvm_keys_accept_valid_values(self):
+        # Valid cases should pass silently
+        cfg = {"microvm": True, "microvm_cpus": 4, "microvm_ram_mib": 1024}
+        self.mod._validate_sidecar_cfg(cfg, allow_privileged=True)
+
+    def test_microvm_invalid_types_rejected(self):
+        with self.assertRaises(ValueError):
+            self.mod._validate_sidecar_cfg({"microvm": "yes"}, allow_privileged=True)
+        with self.assertRaises(ValueError):
+            self.mod._validate_sidecar_cfg({"microvm": True, "microvm_cpus": "four"}, allow_privileged=True)
+        with self.assertRaises(ValueError):
+            self.mod._validate_sidecar_cfg({"microvm": True, "microvm_ram_mib": 64}, allow_privileged=True)
+
 
 class ContainerPathTests(unittest.TestCase):
     def setUp(self):

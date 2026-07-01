@@ -20,6 +20,11 @@ RUN mkdir -p /home/developer/.config/aider \
              /workspace && \
     chown -R developer:developer /home/developer /workspace
 
+# Configure Git system-wide inside the container's image layer (writes to /etc/gitconfig).
+# This prevents safe.directory ownership blocking on host mounts without modifying
+# or polluting your host-side personal ~/.gitconfig.
+RUN git config --system --add safe.directory '*'
+
 USER developer
 WORKDIR /workspace
 
