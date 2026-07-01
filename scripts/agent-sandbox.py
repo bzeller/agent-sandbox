@@ -1321,7 +1321,11 @@ def main():
     cmd_str = " ".join(shlex.quote(arg) for arg in target_cmd)
 
     if is_micro_enabled:
-        wrapped_cmd = ["/bin/bash", "--login", "-c", cmd_str]
+        # Securely step down from root (UID 0) to 'developer' (UID 1000) inside the MicroVM
+        # guest kernel before executing the target tool. This is a critical krun security
+        # constraint: krun completely ignores the Dockerfile USER directive and always boots
+        # as root natively; runuser cleanly enforces privilege reduction.
+        wrapped_cmd = ["/bin/bash", "--login", "-c", f"runuser -u developer -- {cmd_str}"]
     else:
         wrapped_cmd = ["/bin/bash", "--login", "-c", f"dbus-run-session -- {cmd_str}"]
     podman_cmd.extend(wrapped_cmd)
