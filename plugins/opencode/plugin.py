@@ -36,12 +36,6 @@ class Plugin(BasePlugin):
         # Trigger workspace-to-global config migration
         self.migrate_config(ws_meta_dir, xdg_config)
 
-    def get_update_command(self, latest_version):
-        # Force HTTPS-only and TLS 1.2+ to mitigate protocol-downgrade attacks.
-        # Pinning to a specific release with a checksum would be more secure;
-        # see the Dockerfile.template comment for details.
-        return "curl --proto '=https' --tlsv1.2 -fsSL https://opencode.ai/install | bash"
-
     def migrate_config(self, ws_meta_dir, xdg_config):
         local_auth = ws_meta_dir / "auth.json"
         global_auth = xdg_config / "auth.json"
