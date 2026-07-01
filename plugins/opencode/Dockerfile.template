@@ -4,7 +4,7 @@ FROM {base_image}
 RUN zypper --non-interactive refresh && \
     zypper --non-interactive install -y gawk diffutils gettext-tools && \
     zypper --non-interactive install -y \
-    sudo shadow which curl dbus-1 dbus-1-daemon
+    sudo shadow which curl dbus-1 dbus-1-daemon git-core
 
 # Create a developer user (UID 1000) for rootless mapping.
 # Passwordless sudo is scoped to zypper only (needed for package installs
