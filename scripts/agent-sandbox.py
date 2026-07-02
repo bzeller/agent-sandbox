@@ -1320,10 +1320,9 @@ def main():
         # guest kernel before executing the target tool. This is a critical krun security
         # constraint: krun completely ignores the Dockerfile USER directive and always boots
         # as root natively.
-        # We use 'su -p -s /bin/sh developer -c' to drop privileges while preserving environment
-        # variables, and explicitly execute the command via /bin/sh to completely suppress any
-        # bash job-control or ttyname terminal warnings.
-        wrapped_cmd = ["su", "-p", "-s", "/bin/sh", "developer", "-c", f"dbus-run-session -- {cmd_str}"]
+        # We use 'su -l' (login shell) to drop privileges, load the user's profile, and set up
+        # the environment properly. The '-c' flag executes the command in that login shell context.
+        wrapped_cmd = ["su", "-l", "developer", "-c", f"dbus-run-session -- {cmd_str}"]
     else:
         wrapped_cmd = ["/bin/bash", "--login", "-c", f"dbus-run-session -- {cmd_str}"]
     podman_cmd.extend(wrapped_cmd)
