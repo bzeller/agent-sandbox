@@ -1203,20 +1203,15 @@ def main():
         "--security-opt", "no-new-privileges",
         "--hostname", container_hostname,
         "--pids-limit", "1024",
+        # Always mount a user-owned transient runtime dir and configure XDG_RUNTIME_DIR
+        # for both standard containers and MicroVMs. This is critical for dbus-run-session
+        # (used in both modes) to write its transient session sockets without permission errors.
+        "--env", "XDG_RUNTIME_DIR=/home/developer/.run",
+        "-v", f"{ws_run_dir}:/home/developer/.run:Z",
     ]
 
     # Configure hardware-virtualized microVM runtime (krun) if requested
     is_micro_enabled, micro_cpus, micro_ram = _apply_microvm_runtime(podman_cmd, cfg, args)
-
-    if not is_micro_enabled:
-        # Standard Namespace Container Execution:
-        # Mount a user-owned transient runtime dir to prevent permissions errors.
-        podman_cmd.extend([
-            "--env",
-            "XDG_RUNTIME_DIR=/home/developer/.run",
-            "-v",
-            f"{ws_run_dir}:/home/developer/.run:Z",
-        ])
 
     # Dynamically mount isolated config and data directories only if defined by the plugin.
     # This prevents masking standard tool-compiled program directories inside the container
@@ -1324,8 +1319,11 @@ def main():
         # Securely step down from root (UID 0) to 'developer' (UID 1000) inside the MicroVM
         # guest kernel before executing the target tool. This is a critical krun security
         # constraint: krun completely ignores the Dockerfile USER directive and always boots
-        # as root natively; runuser cleanly enforces privilege reduction.
-        wrapped_cmd = ["/bin/bash", "--login", "-c", f"runuser -u developer -- {cmd_str}"]
+        # as root natively.
+        # We use 'su -p -s /bin/sh developer -c' to drop privileges while preserving environment
+        # variables, and explicitly execute the command via /bin/sh to completely suppress any
+        # bash job-control or ttyname terminal warnings.
+        wrapped_cmd = ["su", "-p", "-s", "/bin/sh", "developer", "-c", f"dbus-run-session -- {cmd_str}"]
     else:
         wrapped_cmd = ["/bin/bash", "--login", "-c", f"dbus-run-session -- {cmd_str}"]
     podman_cmd.extend(wrapped_cmd)
