@@ -1320,9 +1320,10 @@ def main():
         # guest kernel before executing the target tool. This is a critical krun security
         # constraint: krun completely ignores the Dockerfile USER directive and always boots
         # as root natively.
-        # Use 'su' without '-l' to preserve the environment and TTY properly for interactive
-        # TUI applications. The '-s /bin/bash' ensures we get a proper shell for the command.
-        wrapped_cmd = ["su", "-s", "/bin/bash", "developer", "-c", f"cd /workspace && dbus-run-session -- {cmd_str}"]
+        # Use 'su -' (equivalent to 'su -l') to simulate a full login which loads the user's
+        # profile and sets up PATH correctly, while still preserving the TTY for interactive
+        # TUI applications.
+        wrapped_cmd = ["su", "-", "developer", "-c", f"cd /workspace && dbus-run-session -- {cmd_str}"]
     else:
         wrapped_cmd = ["/bin/bash", "--login", "-c", f"dbus-run-session -- {cmd_str}"]
     podman_cmd.extend(wrapped_cmd)
