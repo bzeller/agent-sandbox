@@ -1035,12 +1035,10 @@ def main():
     ws_meta_dir = migrate_legacy_workspace_dir(xdg_data, work_dir)
     ws_hash = get_workspace_hash(work_dir)
     ws_config_dir = ws_meta_dir / "config"
-    ws_run_dir = ws_meta_dir / "run"
 
     # Pre-create host dirs with correct permissions
     ws_meta_dir.mkdir(parents=True, exist_ok=True)
     ws_config_dir.mkdir(parents=True, exist_ok=True)
-    ws_run_dir.mkdir(parents=True, exist_ok=True)
     xdg_config.mkdir(parents=True, exist_ok=True)
 
     # Let the plugin dynamically initialize its own folders, files, and migrations
@@ -1184,6 +1182,12 @@ def main():
     internal_home = "/home/developer"
     container_name = f"{plugin.container_prefix}-{ws_hash}-{int(datetime.now().timestamp())}"
     container_hostname = f"{plugin.container_prefix}-{ws_hash}"
+    
+    # Create a unique runtime directory for THIS container instance to prevent
+    # conflicts when multiple sandboxes run simultaneously. Each container gets
+    # its own isolated D-Bus session and runtime state.
+    ws_run_dir = ws_meta_dir / "run" / container_name
+    ws_run_dir.mkdir(parents=True, exist_ok=True)
     
     podman_cmd = [
         "podman",
