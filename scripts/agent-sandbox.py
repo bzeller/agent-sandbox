@@ -1183,12 +1183,6 @@ def main():
     container_name = f"{plugin.container_prefix}-{ws_hash}-{int(datetime.now().timestamp())}"
     container_hostname = f"{plugin.container_prefix}-{ws_hash}"
     
-    # Create a unique runtime directory for THIS container instance to prevent
-    # conflicts when multiple sandboxes run simultaneously. Each container gets
-    # its own isolated D-Bus session and runtime state.
-    ws_run_dir = ws_meta_dir / "run" / container_name
-    ws_run_dir.mkdir(parents=True, exist_ok=True)
-    
     podman_cmd = [
         "podman",
         "run",
@@ -1207,11 +1201,6 @@ def main():
         "--security-opt", "no-new-privileges",
         "--hostname", container_hostname,
         "--pids-limit", "1024",
-        # Always mount a user-owned transient runtime dir and configure XDG_RUNTIME_DIR
-        # for both standard containers and MicroVMs. This is critical for dbus-run-session
-        # (used in both modes) to write its transient session sockets without permission errors.
-        "--env", "XDG_RUNTIME_DIR=/home/developer/.run",
-        "-v", f"{ws_run_dir}:/home/developer/.run:Z",
     ]
 
     # Configure hardware-virtualized microVM runtime (krun) if requested
@@ -1335,10 +1324,10 @@ def main():
             "/bin/bash",
             "--login",
             "-c",
-            f"cd /workspace && dbus-run-session -- {cmd_str}"
+            f"cd /workspace && {cmd_str}"
         ]
     else:
-        wrapped_cmd = ["/bin/bash", "--login", "-c", f"dbus-run-session -- {cmd_str}"]
+        wrapped_cmd = ["/bin/bash", "--login", "-c", cmd_str]
     podman_cmd.extend(wrapped_cmd)
 
     if args.dry_run:
