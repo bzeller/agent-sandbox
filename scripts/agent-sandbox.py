@@ -1191,9 +1191,9 @@ def main():
         "--name",
         container_name,
         "--workdir",
-        "/workspace",
+        str(work_dir),
         "-v",
-        f"{work_dir}:/workspace:Z",
+        f"{work_dir}:{work_dir}:Z",
         "--userns=keep-id",
         # -- Hardening security configurations --
         "--tmpfs", "/tmp:rw,nosuid,size=1g",
@@ -1324,7 +1324,7 @@ def main():
             "/bin/bash",
             "--login",
             "-c",
-            f"cd /workspace && {cmd_str}"
+            f"cd {shlex.quote(str(work_dir))} && {cmd_str}"
         ]
     else:
         wrapped_cmd = ["/bin/bash", "--login", "-c", cmd_str]
