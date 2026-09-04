@@ -17,5 +17,11 @@ class Plugin(BasePlugin):
     shared_config_files = [".aider.conf.yml"]
 
     def mount_config(self, podman_cmd, ws_meta_dir, xdg_config, internal_home):
+        # No SELinux relabel suffix (':z'/':Z'). These live under the plugin-level
+        # xdg_config, shared across ALL workspaces and with the host. Any relabel
+        # rewrites the host path's type in place and persists after exit; ':Z'
+        # additionally assigns a private per-container category, so a second
+        # concurrent sandbox would steal the label and break the first with
+        # EACCES. Labeling is disabled for the container, so none is needed.
         for f in self.shared_config_files:
-            podman_cmd.extend(["-v", f"{xdg_config / f}:{internal_home}/{f}:Z"])
+            podman_cmd.extend(["-v", f"{xdg_config / f}:{internal_home}/{f}"])

@@ -2,12 +2,13 @@
 
 A pluggable, distro-agnostic manager for **Rootless Podman** designed to provide isolated, project-specific development environments for various AI coding assistants (like **OpenCode**, **Aider**, and **Claude Code**).
 
-By utilizing a class-based runtime plugin system and dynamic, hierarchical template resolution, `agent-sandbox` ensures absolute isolation of workspace state, configurations, and cache, while seamlessly sharing global identities and authentication tokens.
+By utilizing a class-based runtime plugin system and dynamic, hierarchical template resolution, `agent-sandbox` keeps workspace state, configuration, and cache isolated per project, while seamlessly sharing global identities and authentication tokens. See [SELinux Labeling & Isolation Boundary](#-selinux-labeling--isolation-boundary) for the precise scope of that isolation.
 
 ---
 
 ## 🗺️ Table of Contents
 * [🚀 Key Features](#-key-features)
+* [🔐 SELinux Labeling & Isolation Boundary](#-selinux-labeling--isolation-boundary)
 * [📦 Installation & Symlink Setups](#-installation--symlink-setups)
 * [🐚 Basic Usage & CLI Examples](#-basic-usage--cli-examples)
 * [🐚 Custom Commands & Shell Access](#-custom-commands--shell-access)
@@ -22,6 +23,38 @@ By utilizing a class-based runtime plugin system and dynamic, hierarchical templ
 * **Workspace Isolation:** Project session logs, metadata, and caches are completely isolated per directory.
 * **Private D-Bus & Runtime Sessions:** Prevents multi-instance collisions (such as JS `GType` errors) by wrapping standard container executions in private D-Bus and runtime sessions.
 * **Targeted Image Pruning:** Automatically identifies and prunes older workspace-specific image layers upon successful tool upgrades to keep your host disk completely clean.
+* **Non-Invasive Mounts:** Never rewrites SELinux labels on your host. Your workspace stays fully usable by host tools (editors, IDEs, `git`) while sandboxes are running.
+
+---
+
+## 🔐 SELinux Labeling & Isolation Boundary
+
+`agent-sandbox` mounts every host path **without** an SELinux relabel suffix (`:z` / `:Z`) and instead runs containers with `--security-opt label=disable`.
+
+**Why.** Both `:z` and `:Z` rewrite the host path's SELinux type to `container_file_t` **in place**, and that change *persists after the container exits* — permanently mutating your source tree and home directory. `:Z` is worse still: it assigns a private, per-container MCS category, so a second sandbox started concurrently steals the label and the first one fails with `EACCES`. This previously broke shared credential directories (e.g. `~/.config/gcloud`) for the host *and* for every other sandbox.
+
+**What actually provides isolation.** The filesystem boundary is the **mount namespace**, not SELinux: a container can only see its own image plus the paths explicitly mounted into it. Combined with rootless Podman and `--userns=keep-id`, the container runs as your own unprivileged user, so an escape yields your privileges — not root. Access to host paths is further gated by the [trust model](docs/TRUST_MODEL.md), which requires explicit approval for privileged mounts.
+
+**What this trades away.** With labeling disabled, SELinux no longer provides a *second* barrier if the mount namespace is escaped (via a kernel or runtime vulnerability, or a leaked file descriptor). Under `container_t` confinement such a process still could not read `user_home_t` files; now it could reach anything your user can. Containers also no longer receive MCS-based isolation from one another.
+
+> [!IMPORTANT]
+> This is a deliberate trade-off: SELinux never protected against the primary threat here — an agent misusing the access it was *deliberately granted* (your workspace and any mounted credentials). It only guarded against sandbox escape.
+>
+> **If you are running genuinely untrusted or hostile code, use `--microvm`.** That provides a hardware-enforced KVM boundary and is unaffected by container SELinux labeling. See [MicroVMs](docs/MICROVM.md).
+
+### Repairing labels from earlier versions
+
+Versions that used `:Z` left host paths permanently relabeled. To restore them:
+
+```bash
+restorecon -R -v ~/my-project          # any previously sandboxed workspace
+restorecon -R -v ~/.config/gcloud      # and any mounted credential/config dirs
+
+# Verify: expect user_home_t / config_home_t, with no container_file_t
+# and no :cNNN,cMMM category suffix.
+ls -ldZ ~/my-project ~/.config/gcloud
+```
+
 
 ---
 
