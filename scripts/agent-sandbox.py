@@ -5,11 +5,11 @@ import importlib.util
 import json
 import os
 import re
+import secrets
 import shlex
 import subprocess
 import sys
 import urllib.request
-from datetime import datetime
 from pathlib import Path
 
 # --- PATH RESOLUTION (Symlink-Safe) ---
@@ -1180,8 +1180,17 @@ def main():
 
     # 3. Execute Sandbox Setup
     internal_home = "/home/developer"
-    container_name = f"{plugin.container_prefix}-{ws_hash}-{int(datetime.now().timestamp())}"
-    container_hostname = f"{plugin.container_prefix}-{ws_hash}"
+    # Unique per-invocation suffix. A whole-second timestamp is NOT sufficient:
+    # two sandboxes launched for the same workspace within the same second would
+    # derive the identical container name and podman would refuse to start the
+    # second ("container name ... is already in use"). Mix in high-resolution
+    # time, the PID, and random bytes so concurrent launches never collide.
+    run_id = f"{os.getpid():x}-{secrets.token_hex(4)}"
+    container_name = f"{plugin.container_prefix}-{ws_hash}-{run_id}"
+    # The hostname must also be unique per instance; otherwise two concurrent
+    # containers for the same workspace share a hostname, which breaks tooling
+    # that keys off it (and the private D-Bus "multi-instance" guard below).
+    container_hostname = f"{plugin.container_prefix}-{ws_hash}-{run_id}"
     
     podman_cmd = [
         "podman",
@@ -1192,13 +1201,29 @@ def main():
         container_name,
         "--workdir",
         str(work_dir),
+        # The workspace is mounted WITHOUT an SELinux relabel suffix (no ':z'/':Z').
+        # Both suffixes rewrite the host path's type to 'container_file_t' *in place*
+        # and that change persists after the container exits, permanently mutating
+        # the user's source tree. ':Z' additionally assigns a private per-container
+        # MCS category, which makes the directory inaccessible to any other
+        # container. The workspace must stay usable by host tools (editors, git,
+        # IDEs, and confined host services), so we leave its label untouched and
+        # instead disable SELinux labeling for this container (see label=disable
+        # below), which grants access without modifying anything on the host.
         "-v",
-        f"{work_dir}:{work_dir}:Z",
+        f"{work_dir}:{work_dir}",
         "--userns=keep-id",
         # -- Hardening security configurations --
         "--tmpfs", "/tmp:rw,nosuid,size=1g",
         # "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
+        # Required for the unlabeled workspace mount above: under an enforcing
+        # policy 'container_t' is not permitted to access 'user_home_t', so
+        # without this the container could not read its own workspace. This trades
+        # SELinux type enforcement for leaving the host filesystem pristine.
+        # Containment still rests on the user namespace, no-new-privileges, the
+        # pids limit, and the fact that only explicitly-approved paths are mounted.
+        "--security-opt", "label=disable",
         "--hostname", container_hostname,
         "--pids-limit", "1024",
     ]
@@ -1209,15 +1234,28 @@ def main():
     # Dynamically mount isolated config and data directories only if defined by the plugin.
     # This prevents masking standard tool-compiled program directories inside the container
     # (such as Claude's compiled binary assets in ~/.local/share/claude).
+    # No SELinux relabel suffix: see the label=disable rationale above. These are
+    # host paths under XDG_DATA_HOME, and relabeling them would mutate the host
+    # for no benefit now that labeling is disabled for the container.
     if plugin.internal_config_dir:
-        podman_cmd.extend(["-v", f"{ws_config_dir}:{plugin.internal_config_dir}:Z"])
+        podman_cmd.extend(["-v", f"{ws_config_dir}:{plugin.internal_config_dir}"])
     if plugin.internal_data_dir:
-        podman_cmd.extend(["-v", f"{ws_meta_dir}:{plugin.internal_data_dir}:Z"])
+        podman_cmd.extend(["-v", f"{ws_meta_dir}:{plugin.internal_data_dir}"])
 
     # Let the plugin append its own configuration mounts
     plugin.mount_config(podman_cmd, ws_meta_dir, xdg_config, internal_home)
 
-    # Add custom mounts from sidecar
+    # Add custom mounts from sidecar.
+    #
+    # No SELinux relabel suffix is used. User-supplied mounts are typically host
+    # paths shared with the host and with other sandboxes (credential/config dirs
+    # such as ~/.config/gcloud or ~/.aws). Both ':z' and ':Z' rewrite the host
+    # path's type to 'container_file_t' *in place*, and that change persists after
+    # the container exits — permanently mutating the user's home directory. ':Z'
+    # is worse still: it assigns a private per-container MCS category, so a second
+    # concurrent sandbox steals the label and the first fails with EACCES.
+    # Labeling is disabled for this container (see label=disable above), so access
+    # is granted without any relabel and the host filesystem is left untouched.
     for m in cfg.get("mounts", []):
         try:
             host_p = Path(m["host"]).expanduser().resolve()
@@ -1228,7 +1266,7 @@ def main():
                 )
             cont_p = _validate_container_path(m["container"], source="sidecar")
             _warn_if_sensitive_host_mount(host_p, source="sidecar config")
-            podman_cmd.extend(["-v", f"{host_p}:{cont_p}:Z"])
+            podman_cmd.extend(["-v", f"{host_p}:{cont_p}"])
         except (KeyError, ValueError) as e:
             print(f"❌ Error: Invalid mount configuration: {e}")
             sys.exit(1)
@@ -1255,7 +1293,10 @@ def main():
     for port_mapping in cfg.get("ports", []):
         podman_cmd.extend(["-p", port_mapping])
 
-    # Secure SSH Agent Forwarding (optional, specified in sidecar)
+    # Secure SSH Agent Forwarding (optional, specified in sidecar).
+    # No relabel suffix: this socket belongs to the ssh-agent running in the
+    # user's host session. Relabeling it would persistently alter a live host
+    # socket and could break SSH for the whole desktop session.
     if cfg.get("ssh_auth_sock", False):
         host_ssh_sock = os.environ.get("SSH_AUTH_SOCK")
         if host_ssh_sock and Path(host_ssh_sock).exists():
@@ -1263,7 +1304,7 @@ def main():
             podman_cmd.extend(
                 [
                     "-v",
-                    f"{host_ssh_sock}:{container_ssh_sock}:Z",
+                    f"{host_ssh_sock}:{container_ssh_sock}",
                     "--env",
                     f"SSH_AUTH_SOCK={container_ssh_sock}",
                 ]
@@ -1273,7 +1314,9 @@ def main():
                 "DEBUG: ssh_auth_sock enabled in config, but SSH_AUTH_SOCK is not set or valid on the host."
             )
 
-    # Add extra directories from CLI
+    # Add extra directories from CLI. No relabel suffix, for the same reason as
+    # the sidecar mounts above: relabeling would persistently mutate the host
+    # path, and labeling is disabled for this container anyway.
     if args.include_dir:
         for inc in args.include_dir:
             if ":" in inc:
@@ -1285,11 +1328,11 @@ def main():
                     print(f"❌ Error: {e}")
                     sys.exit(1)
                 _warn_if_sensitive_host_mount(h_p, source="--include-dir")
-                podman_cmd.extend(["-v", f"{h_p}:{c_p}:Z"])
+                podman_cmd.extend(["-v", f"{h_p}:{c_p}"])
             else:
                 h_p = Path(inc).expanduser().resolve()
                 _warn_if_sensitive_host_mount(h_p, source="--include-dir")
-                podman_cmd.extend(["-v", f"{h_p}:/mnt/{h_p.name}:Z"])
+                podman_cmd.extend(["-v", f"{h_p}:/mnt/{h_p.name}"])
 
     if args.root:
         podman_cmd.extend(["--user", "root"])

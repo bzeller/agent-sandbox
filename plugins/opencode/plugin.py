@@ -141,9 +141,15 @@ class Plugin(BasePlugin):
 
     def mount_config(self, podman_cmd, ws_meta_dir, xdg_config, internal_home):
         global_auth = xdg_config / "auth.json"
+        # No SELinux relabel suffix (':z'/':Z'). These live under the plugin-level
+        # xdg_config and are shared across ALL workspaces and with the host. Any
+        # relabel rewrites the host path's type in place and persists after exit;
+        # ':Z' additionally assigns a private per-container category, so a second
+        # concurrent sandbox would steal the label and break the first with EACCES.
+        # SELinux labeling is disabled for the container, so no relabel is needed.
         for d in self.shared_config_dirs:
-            podman_cmd.extend(["-v", f"{xdg_config / d}:{internal_home}/.config/opencode/{d}:Z"])
+            podman_cmd.extend(["-v", f"{xdg_config / d}:{internal_home}/.config/opencode/{d}"])
         podman_cmd.extend([
-            "-v", f"{global_auth}:{internal_home}/.local/share/opencode/auth.json:Z"
+            "-v", f"{global_auth}:{internal_home}/.local/share/opencode/auth.json"
         ])
 

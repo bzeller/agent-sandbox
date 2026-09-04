@@ -34,10 +34,16 @@ class Plugin(BasePlugin):
         super().initialize(ws_meta_dir, xdg_config)
 
     def mount_config(self, podman_cmd, ws_meta_dir, xdg_config, internal_home):
+        # No SELinux relabel suffix (':z'/':Z'). These live under the plugin-level
+        # xdg_config, shared across ALL workspaces and with the host. Any relabel
+        # rewrites the host path's type in place and persists after the container
+        # exits; ':Z' additionally assigns a private per-container category, so a
+        # second concurrent sandbox would steal the label and break the first with
+        # EACCES. Labeling is disabled for the container, so no relabel is needed.
         # Mount the shared settings.json file into .claude/settings.json
         for f in self.shared_config_files:
-            podman_cmd.extend(["-v", f"{xdg_config / f}:{self.internal_config_dir}/{f}:Z"])
+            podman_cmd.extend(["-v", f"{xdg_config / f}:{self.internal_config_dir}/{f}"])
             
         # Mount the shared global login session file directly to ~/.claude.json
         global_session = xdg_config / "claude.json"
-        podman_cmd.extend(["-v", f"{global_session}:{internal_home}/.claude.json:Z"])
+        podman_cmd.extend(["-v", f"{global_session}:{internal_home}/.claude.json"])
