@@ -1,12 +1,15 @@
 import json
 import os
 import sys
+import urllib.request
 from pathlib import Path
 from plugins.base import BasePlugin
 
 class Plugin(BasePlugin):
     name = "opencode"
     github_repo = "anomalyco/opencode"
+    # The GitHub releases feed is pinned to 1.x; 2.x is only announced here.
+    latest_version_url = "https://opencode.ai/update/api/latest/cli/npm"
     first_run_message = "💡 First run for this workspace: OpenCode may perform a one-time database migration. Please wait..."
 
     host_config_subdir = "opencode-sandbox"
@@ -20,6 +23,24 @@ class Plugin(BasePlugin):
 
     shared_config_dirs = ["modes"]
     shared_config_files = ["auth.json"]
+
+    def get_latest_version(self, debug=False):
+        """Ask upstream's update endpoint, since GitHub releases/latest stays on 1.x."""
+        try:
+            req = urllib.request.Request(
+                self.latest_version_url, headers={"User-Agent": "agent-sandbox-cli"}
+            )
+            with urllib.request.urlopen(req, timeout=5) as response:
+                latest = json.loads(response.read().decode()).get("version", "")
+            if not latest:
+                print(f"⚠️ Warning: update endpoint returned no version for {self.name}.")
+                return None
+            if debug:
+                print(f"DEBUG [{self.name}]: Latest version upstream: v{latest}")
+            return latest
+        except Exception as e:
+            print(f"⚠️ Warning: Could not check for latest version of {self.name}: {e}")
+        return None
 
     def initialize(self, ws_meta_dir, xdg_config):
         # Pre-create global auth file with owner-only permissions (0o600).

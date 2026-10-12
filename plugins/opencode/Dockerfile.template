@@ -48,7 +48,23 @@ ARG TOOL_VERSION=latest
 # and verifying its checksum, e.g.:
 #   curl -fsSL https://github.com/anomalyco/opencode/releases/download/vX.Y.Z/opencode-linux-x86_64.tar.gz \
 #     | sha256sum --check <(echo "EXPECTED_HASH  -") && tar -xz ...
-RUN curl --proto '=https' --tlsv1.2 -fsSL https://opencode.ai/install | bash
+#
+# opencode 2.0 uses a separate installer (/v2/install). The original /install
+# script is frozen at 1.x: it resolves GitHub releases/latest and downloads
+# release assets, which do not exist for 2.x. The v2 installer fetches the
+# platform package from the npm registry and needs only curl and tar.
+# TOOL_VERSION pins a specific version; "latest" installs the current release.
+#
+# The script is saved to a file first so that a failed download is an error
+# (piping an empty body into bash exits 0). The installer itself is retried
+# because it queries opencode.ai/update/api, which has returned transient 500s.
+RUN curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --retry-delay 2 \
+      -o /tmp/opencode-install.sh https://opencode.ai/v2/install && \
+    if [ "$TOOL_VERSION" = "latest" ]; then ARGS=""; else ARGS="--version $TOOL_VERSION"; fi && \
+    ok=; for i in 1 2 3 4; do bash /tmp/opencode-install.sh $ARGS && ok=1 && break; sleep 5; done && \
+    [ -n "$ok" ] && \
+    rm -f /tmp/opencode-install.sh && \
+    /home/developer/.opencode/bin/opencode --version
 
 # Remove the zypper-only sudo rule now that all package installation is done.
 # The developer user no longer has any elevated privileges at runtime.
