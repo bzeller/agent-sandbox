@@ -53,4 +53,6 @@ To prevent obscure, low-level virtualization crashes, `agent-sandbox` runs a gra
 2.  **Host Permissions:** Verifies your host user has read/write access to `/dev/kvm`. If not, it outputs a clean, helpful message prompting you to inspect your local `/dev/kvm` group permissions.
 3.  **OCI Runtime Configuration:** Verifies `krun` is configured as a valid OCI runtime in Podman, falling back to verifying `crun` availability (since `krun` is simply a specialized handler for `crun`).
 
+**User identity inside the VM:** `krun` always boots as root, so the tool is started through `setpriv`, which drops to the `developer` user (UID/GID 1000). Thanks to the `--userns=keep-id:uid=1000,gid=1000` mapping, that identity corresponds to your host user, so files written to the workspace are owned by you on the host.
+
 If any check fails, the script performs a clean exit and prints **clear, actionable, and distro-agnostic instructions** in your terminal to resolve the issue!

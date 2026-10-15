@@ -76,6 +76,14 @@ def discover_plugins():
 
 PLUGINS = discover_plugins()
 
+# UID/GID of the 'developer' user baked into every plugin image
+# (see plugins/*/Dockerfile.template). The host user is mapped onto this
+# identity via --userns=keep-id:uid=...,gid=..., so host-owned bind mounts
+# appear as owned by 'developer' inside the container and vice versa.
+CONTAINER_UID = 1000
+CONTAINER_GID = 1000
+MIN_PODMAN_VERSION = (4, 3)
+
 # --- RESOLUTION UTILITIES ---
 
 
@@ -779,12 +787,49 @@ def _warn_if_sensitive_host_mount(host_path, source="sidecar"):
         )
 
 
+def _parse_podman_version(output):
+    """Extract a version tuple such as (5, 2, 3) from `podman --version` output.
+
+    Returns None if no dotted version number can be found.
+    """
+    match = re.search(r"(\d+(?:\.\d+)+)", output or "")
+    if not match:
+        return None
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def _userns_flag():
+    """Map the invoking host user onto the image's 'developer' user."""
+    return f"--userns=keep-id:uid={CONTAINER_UID},gid={CONTAINER_GID}"
+
+
 def doctor_check(template_path):
     """Verify the environment is sane."""
     try:
-        subprocess.run(["podman", "--version"], capture_output=True, check=True)
+        result = subprocess.run(
+            ["podman", "--version"], capture_output=True, text=True, check=True
+        )
     except (subprocess.CalledProcessError, FileNotFoundError):
         print("❌ Error: 'podman' not found. Please install it first.")
+        sys.exit(1)
+
+    podman_version = _parse_podman_version(result.stdout)
+    if podman_version is None:
+        print(
+            f"⚠️ Warning: Could not determine the Podman version from "
+            f"{result.stdout.strip()!r}; continuing."
+        )
+    elif podman_version < MIN_PODMAN_VERSION:
+        found = ".".join(str(p) for p in podman_version)
+        required = ".".join(str(p) for p in MIN_PODMAN_VERSION)
+        print(f"❌ Error: Podman {required} or newer is required (found {found}).")
+        print("   It is needed to map your user onto the container's 'developer' user")
+        print(f"   ({_userns_flag()}).")
+        sys.exit(1)
+
+    if os.geteuid() == 0:
+        print("❌ Error: agent-sandbox must be run as a regular user (rootless Podman).")
+        print("   --userns=keep-id is not supported when Podman runs as root.")
         sys.exit(1)
 
     if not template_path:
@@ -1212,7 +1257,7 @@ def main():
         # below), which grants access without modifying anything on the host.
         "-v",
         f"{work_dir}:{work_dir}",
-        "--userns=keep-id",
+        _userns_flag(),
         # -- Hardening security configurations --
         "--tmpfs", "/tmp:rw,nosuid,size=1g",
         # "--cap-drop", "ALL",
@@ -1352,17 +1397,19 @@ def main():
     cmd_str = " ".join(shlex.quote(arg) for arg in target_cmd)
 
     if is_micro_enabled:
-        # Securely step down from root (UID 0) to 'developer' (UID 1000) inside the MicroVM
-        # guest kernel before executing the target tool. This is a critical krun security
-        # constraint: krun completely ignores the Dockerfile USER directive and always boots
-        # as root natively.
+        # Securely step down from root (UID 0) to 'developer' (CONTAINER_UID) inside the
+        # MicroVM guest kernel before executing the target tool. This is a critical krun
+        # security constraint: krun completely ignores the Dockerfile USER directive and
+        # always boots as root natively. Because of the --userns=keep-id:uid=...,gid=...
+        # mapping, this UID corresponds to the invoking host user, so files written to
+        # the workspace are owned by that user on the host.
         # Use 'setpriv' to drop privileges while preserving the execution environment (including
         # the PTY) better than su/runuser. We then exec bash as a login shell to load the user's
         # profile and set up PATH correctly.
         wrapped_cmd = [
             "setpriv",
-            "--reuid=1000",
-            "--regid=1000",
+            f"--reuid={CONTAINER_UID}",
+            f"--regid={CONTAINER_GID}",
             "--init-groups",
             "/bin/bash",
             "--login",

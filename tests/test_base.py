@@ -49,7 +49,7 @@ class SanitisePodmanCmdTests(unittest.TestCase):
         self.cmd = [
             "podman", "run", "-it", "--rm",
             "--name", "foo-123",
-            "--userns=keep-id",
+            "--userns=keep-id:uid=1000,gid=1000",
             "-v", "/a:/b:Z",
             "--env", "X=1",
             "-v", "/c:/d:Z",
@@ -69,7 +69,7 @@ class SanitisePodmanCmdTests(unittest.TestCase):
 
     def test_keeps_non_targeted_flags(self):
         out = self.bp._sanitise_podman_cmd(self.cmd, drop_mounts=False)
-        self.assertIn("--userns=keep-id", out)
+        self.assertIn("--userns=keep-id:uid=1000,gid=1000", out)
         self.assertIn("--env", out)
         self.assertIn("X=1", out)
 

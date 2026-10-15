@@ -50,6 +50,7 @@ agent-sandbox --forget-workspace-trust
 
 To enforce strict isolation, the orchestrator configures Podman with several enterprise-grade security flags by default:
 
+*   **`--userns=keep-id:uid=1000,gid=1000`:** Runs the container in a rootless user namespace that maps your host user onto the image's `developer` user (UID/GID 1000), whatever your host UID is. Container root maps to an unprivileged host subuid, never to host root. Bind-mounted files keep their host ownership: files you own appear as owned by `developer` inside the container, and files created inside are owned by you on the host. Files owned by other host users appear as `nobody` (65534) inside the container.
 *   **`--tmpfs /tmp:rw,nosuid,size=1g`:** Mounts `/tmp` inside the container as a 1GB in-memory temporary filesystem. This keeps temporary files fast, prevents disk-filling attacks, and blocks `setuid` binary executions via `/tmp`.
 *   **`--security-opt no-new-privileges`:** Sets the kernel-level `PR_SET_NO_NEW_PRIVS` flag, preventing any process inside the container or its children from ever escalating privileges (even if a system `setuid` binary is found).
 *   **`--pids-limit 1024`:** Caps the maximum number of concurrent processes to 1024, protecting your host system from **fork-bomb** attacks or runaway loops.

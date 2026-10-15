@@ -6,7 +6,8 @@ RUN zypper --non-interactive refresh && \
     zypper --non-interactive install -y \
     sudo shadow which curl dbus-1 dbus-1-daemon git-core
 
-# Create a developer user (UID 1000) for rootless mapping
+# Create a developer user (UID 1000). The host user is mapped onto this UID at
+# runtime via --userns=keep-id:uid=1000,gid=1000.
 # Passwordless sudo is scoped to zypper only and is removed after package installation
 RUN groupadd -g 1000 developer && \
     useradd -m -u 1000 -g developer -s /bin/bash developer && \

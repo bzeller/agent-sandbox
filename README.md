@@ -33,7 +33,7 @@ By utilizing a class-based runtime plugin system and dynamic, hierarchical templ
 
 **Why.** Both `:z` and `:Z` rewrite the host path's SELinux type to `container_file_t` **in place**, and that change *persists after the container exits* — permanently mutating your source tree and home directory. `:Z` is worse still: it assigns a private, per-container MCS category, so a second sandbox started concurrently steals the label and the first one fails with `EACCES`. This previously broke shared credential directories (e.g. `~/.config/gcloud`) for the host *and* for every other sandbox.
 
-**What actually provides isolation.** The filesystem boundary is the **mount namespace**, not SELinux: a container can only see its own image plus the paths explicitly mounted into it. Combined with rootless Podman and `--userns=keep-id`, the container runs as your own unprivileged user, so an escape yields your privileges — not root. Access to host paths is further gated by the [trust model](docs/TRUST_MODEL.md), which requires explicit approval for privileged mounts.
+**What actually provides isolation.** The filesystem boundary is the **mount namespace**, not SELinux: a container can only see its own image plus the paths explicitly mounted into it. Combined with rootless Podman and `--userns=keep-id:uid=1000,gid=1000`, your host user is mapped onto the container's `developer` user (UID 1000), so the container runs with your own unprivileged identity and files it creates in mounted paths are owned by you on the host — regardless of your host UID. An escape yields your privileges — not root. Access to host paths is further gated by the [trust model](docs/TRUST_MODEL.md), which requires explicit approval for privileged mounts.
 
 **What this trades away.** With labeling disabled, SELinux no longer provides a *second* barrier if the mount namespace is escaped (via a kernel or runtime vulnerability, or a leaked file descriptor). Under `container_t` confinement such a process still could not read `user_home_t` files; now it could reach anything your user can. Containers also no longer receive MCS-based isolation from one another.
 
@@ -59,6 +59,8 @@ ls -ldZ ~/my-project ~/.config/gcloud
 ---
 
 ## 📦 Installation & Symlink Setups
+
+0.  **Requirements:** rootless **Podman 4.3 or newer** (older versions cannot map your user onto the container's `developer` user), run as a regular, non-root user.
 
 1.  **Clone the repository:**
     ```bash
