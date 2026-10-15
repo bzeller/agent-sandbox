@@ -122,6 +122,8 @@ opencode-sandbox opencode auth login github-copilot
 
 The login is kept in the workspace's state directory, so it survives restarts.
 
+There is no browser inside the sandbox. The OpenCode image ships a small `xdg-open` stub that prints the login URL instead of opening it: open that URL (for GitHub Copilot: `https://github.com/login/device`) in a browser on your host and enter the code OpenCode shows.
+
 Providers that read their credentials from the environment (for example Vertex through `GOOGLE_CLOUD_PROJECT` plus a mounted `~/.config/gcloud`) need no login. Pass them with `forward_env`/`mounts` in the [sidecar config](docs/SIDECAR_CONFIG.md).
 
 An `auth.json` left over at `~/.config/opencode-sandbox/auth.json` from earlier versions is no longer used or modified. Delete it once your workspaces are connected.

@@ -71,6 +71,13 @@ RUN curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --retry-delay 2 \
 # The developer user no longer has any elevated privileges at runtime.
 USER root
 RUN sed -i '/developer.*zypper/d' /etc/sudoers
+
+# There is no browser inside the sandbox. OpenCode opens login URLs by spawning
+# "xdg-open", and a missing binary makes the OAuth login (e.g. GitHub Copilot)
+# fail. Provide a stub that prints the URL to stderr and succeeds, so it can be
+# opened in a browser on the host.
+RUN printf '%s\n' '#!/bin/sh' 'echo "Open this URL in a browser on your host: $*" >&2' 'exit 0' \
+      > /usr/local/bin/xdg-open && chmod 755 /usr/local/bin/xdg-open
 USER developer
 
 ENV LANG=en_US.UTF-8
