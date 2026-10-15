@@ -2,7 +2,7 @@
 
 A pluggable, distro-agnostic manager for **Rootless Podman** designed to provide isolated, project-specific development environments for various AI coding assistants (like **OpenCode**, **Aider**, and **Claude Code**).
 
-By utilizing a class-based runtime plugin system and dynamic, hierarchical template resolution, `agent-sandbox` keeps workspace state, configuration, and cache isolated per project, while seamlessly sharing global identities and authentication tokens. See [SELinux Labeling & Isolation Boundary](#-selinux-labeling--isolation-boundary) for the precise scope of that isolation.
+By utilizing a class-based runtime plugin system and dynamic, hierarchical template resolution, `agent-sandbox` keeps workspace state, configuration, and cache isolated per project, while sharing global tool settings (and, for providers that support it, credentials passed through the environment or mounted from the host). See [OpenCode Credentials](#-opencode-credentials) for how OpenCode logins are stored. See [SELinux Labeling & Isolation Boundary](#-selinux-labeling--isolation-boundary) for the precise scope of that isolation.
 
 ---
 
@@ -10,6 +10,7 @@ By utilizing a class-based runtime plugin system and dynamic, hierarchical templ
 * [🚀 Key Features](#-key-features)
 * [🔐 SELinux Labeling & Isolation Boundary](#-selinux-labeling--isolation-boundary)
 * [📦 Installation & Symlink Setups](#-installation--symlink-setups)
+* [🔑 OpenCode Credentials](#-opencode-credentials)
 * [🐚 Basic Usage & CLI Examples](#-basic-usage--cli-examples)
 * [🐚 Custom Commands & Shell Access](#-custom-commands--shell-access)
 * [📖 Deep-Dive Documentation](#-deep-dive-documentation)
@@ -106,6 +107,24 @@ agent-sandbox --plugin aider
 * `--include-dir`: Include additional directory (HostPath:ContainerPath or just HostPath for auto-mount in `/mnt`).
 * `--debug`: Show paths, resolved sidecar config, generated Dockerfile, and podman commands.
 * `--dry-run`: Output the generated Podman command without executing it.
+
+---
+
+## 🔑 OpenCode Credentials
+
+OpenCode 2 stores saved provider logins (API keys, OAuth tokens such as GitHub Copilot) in its SQLite database, which lives in the per-workspace state directory (`~/.local/share/opencode-sandbox/ws-<hash>/opencode.db`). Logins are therefore **per workspace**, not shared between workspaces. The sandbox no longer mounts a shared `auth.json`: OpenCode 2 only imports that file once, when it upgrades an existing database, and never writes to it again.
+
+Connect a provider once per workspace, either in the TUI with `/connect` or from the command line:
+
+```bash
+opencode-sandbox opencode auth login github-copilot
+```
+
+The login is kept in the workspace's state directory, so it survives restarts.
+
+Providers that read their credentials from the environment (for example Vertex through `GOOGLE_CLOUD_PROJECT` plus a mounted `~/.config/gcloud`) need no login. Pass them with `forward_env`/`mounts` in the [sidecar config](docs/SIDECAR_CONFIG.md).
+
+An `auth.json` left over at `~/.config/opencode-sandbox/auth.json` from earlier versions is no longer used or modified. Delete it once your workspaces are connected.
 
 ---
 
